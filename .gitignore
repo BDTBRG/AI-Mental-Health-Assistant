@@ -1,4 +1,4 @@
-# Logs
+# ── Logs ────────────────────────────────────────────────
 logs
 *.log
 npm-debug.log*
@@ -7,17 +7,35 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# ── Frontend ────────────────────────────────────────────
 node_modules
 dist
 dist-ssr
 *.local
 
-# Auto-generated
+# Auto-generated TypeScript
 auto-imports.d.ts
 components.d.ts
 *.tsbuildinfo
 
-# Editor directories and files
+# ── Backend (Java) ──────────────────────────────────────
+backend/target/
+backend/.mvn/
+backend/mvnw
+backend/mvnw.cmd
+backend/*.jar.original
+
+# ── Agent (Python) ──────────────────────────────────────
+**/__pycache__/
+agent/.pytest_cache/
+agent/*.pyc
+agent/.env
+
+# ── Uploaded files ──────────────────────────────────────
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# ── IDE / Editor ────────────────────────────────────────
 .vscode/*
 !.vscode/extensions.json
 .idea
@@ -27,3 +45,14 @@ components.d.ts
 *.njsproj
 *.sln
 *.sw?
+
+# ── Extracted dependency directories (accidental) ───────
+aopalliance/
+ch/
+com/
+commons-io/
+io/
+jakarta/
+javax/
+net/
+org/

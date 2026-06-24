@@ -85,9 +85,9 @@ const submitForm = async (formEl: FormInstance | undefined) => {
 				localStorage.setItem('userInfo', JSON.stringify(data.userInfo))
 				ElMessage.success('登录成功')
 				setTimeout(() => {
-					if (data.roleType === '1') {
-						window.location.href = ''
-					} else if (data.roleType === '2') {
+					if (data.userInfo.userType === 1) {
+						window.location.href = '/'
+					} else if (data.userInfo.userType === 2) {
 						window.location.href = '/back/dashboard'
 					}
 				}, 1000)
