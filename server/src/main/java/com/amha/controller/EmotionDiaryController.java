@@ -11,6 +11,8 @@ import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
+
 @RestController
 @RequestMapping("/emotion-diary")
 @RequiredArgsConstructor
@@ -25,6 +27,17 @@ public class EmotionDiaryController {
         emotionDiaryService.submitDiary(request, userId);
         return Result.success();
     }
+
+    /**
+     * 用户端：获取自己的日记列表（含AI分析结果）
+     */
+    @GetMapping("/my")
+    public Result<List<EmotionDiaryVO>> getMyDiaries(HttpServletRequest httpRequest) {
+        Long userId = (Long) httpRequest.getAttribute("userId");
+        return Result.success(emotionDiaryService.getUserDiaries(userId));
+    }
+
+    // ---- 管理端 ----
 
     @GetMapping("/admin/page")
     public Result<PageResult<EmotionDiaryVO>> getAdminPage(EmotionDiaryPageQuery query) {

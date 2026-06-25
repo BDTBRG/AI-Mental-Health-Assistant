@@ -7,6 +7,7 @@ import type {
 	ListData,
 	EmotionAnalysis,
 	EmotionDiaryQuery,
+	EmotionDiaryVO,
 	KnowledgeArticle,
 	KnowledgeArticleQuery,
 	KnowledgeArticleDetail,
@@ -50,6 +51,11 @@ export function getEmotionAnalysis(
 
 export function submitEmotionDiary(data: EmotionDiaryQuery): Promise<void> {
 	return request.post('/emotion-diary', data)
+}
+
+/** 获取用户自己的情绪日记列表（含AI分析） */
+export function getMyDiaries(): Promise<EmotionDiaryVO[]> {
+	return request.get('/emotion-diary/my')
 }
 
 export function getKnowledgeArticlesList(

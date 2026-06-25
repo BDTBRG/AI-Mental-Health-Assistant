@@ -67,10 +67,10 @@
 			</div>
 		</div>
 		<div class="pagination-wrapper">
-			<el-pagination
-				style="margin-top: 25px"
-				v-model:current-page="pagination.currentPage"
-				v-model:page-size="pagination.size"
+		<el-pagination
+			style="margin-top: 25px"
+			v-model:current-page="pagination.currentPage"
+			v-model:page-size="pagination.pageSize"
 				:total="Number(pagination.total)"
 				layout="prev, pager, next"
 				@change="handleSearch" />
@@ -92,7 +92,7 @@ const router = useRouter()
 
 const pagination = ref({
 	currentPage: '1',
-	size: '10',
+	pageSize: '10',
 	total: 0,
 })
 
@@ -103,7 +103,7 @@ const articleList = ref<KnowledgeArticle[]>([])
 const getRecommendArticles = async () => {
 	const params: KnowledgeArticleQuery = {
 		currentPage: '1',
-		size: '5',
+		pageSize: '5',
 		sortDirection: 'desc',
 		sortField: 'readCount',
 	}

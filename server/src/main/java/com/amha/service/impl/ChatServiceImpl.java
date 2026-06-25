@@ -16,6 +16,7 @@ import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
@@ -33,6 +34,8 @@ public class ChatServiceImpl implements ChatService {
     private final ConsultationSessionMapper sessionMapper;
     private final ConsultationMessageMapper messageMapper;
     private final UserMapper userMapper;
+
+    @Qualifier("realChatAgent")
     private final ChatAgent chatAgent;
 
     @Override
@@ -91,12 +94,10 @@ public class ChatServiceImpl implements ChatService {
         if (session == null) {
             throw new BusinessException("会话不存在");
         }
-        // 管理员可以删除所有会话，普通用户只能删除自己的
         User user = userMapper.selectById(userId);
         if (user.getUserType() != 2 && !session.getUserId().equals(userId)) {
             throw new BusinessException("无权删除该会话");
         }
-        // 删除会话下的所有消息
         messageMapper.delete(new LambdaQueryWrapper<ConsultationMessage>()
                 .eq(ConsultationMessage::getSessionId, sessionId));
         sessionMapper.deleteById(sessionId);
@@ -152,7 +153,7 @@ public class ChatServiceImpl implements ChatService {
         session.setLastMessageTime(LocalDateTime.now());
         sessionMapper.updateById(session);
 
-        // 获取历史消息
+        // 获取历史消息（包含刚插入的用户消息作为上下文）
         List<ConsultationMessage> history = messageMapper.selectList(
                 new LambdaQueryWrapper<ConsultationMessage>()
                         .eq(ConsultationMessage::getSessionId, sessionId)
@@ -161,10 +162,12 @@ public class ChatServiceImpl implements ChatService {
         // SSE流式响应
         SseEmitter emitter = new SseEmitter(300000L); // 5分钟超时
 
+        final StringBuilder fullResponse = new StringBuilder();
+
         chatAgent.streamResponse(sessionId, request.getUserMessage(), history)
                 .doOnNext(chunk -> {
                     try {
-                        // 格式: data: {"code":"200","data":{"content":"..."}}\n\n
+                        fullResponse.append(chunk);
                         String sseData = "{\"code\":\"200\",\"data\":{\"content\":\"" +
                                 escapeJson(chunk) + "\"}}";
                         emitter.send(SseEmitter.event().name("message").data(sseData));
@@ -174,6 +177,26 @@ public class ChatServiceImpl implements ChatService {
                 })
                 .doOnComplete(() -> {
                     try {
+                        // 保存AI回复到数据库
+                        String aiContent = fullResponse.toString();
+                        if (!aiContent.isEmpty()) {
+                            ConsultationMessage aiMsg = new ConsultationMessage();
+                            aiMsg.setSessionId(sessionId);
+                            aiMsg.setSenderType(2);
+                            aiMsg.setContent(aiContent);
+                            messageMapper.insert(aiMsg);
+
+                            // 更新会话
+                            session.setMessageCount(session.getMessageCount() + 1);
+                            session.setLastMessageContent(aiContent);
+                            session.setLastMessageTime(LocalDateTime.now());
+                            if (session.getStartedAt() != null) {
+                                session.setDurationMinutes((int) Duration.between(
+                                        session.getStartedAt(), LocalDateTime.now()).toMinutes());
+                            }
+                            sessionMapper.updateById(session);
+                        }
+
                         emitter.send(SseEmitter.event().name("done").data("{\"code\":\"200\"}"));
                         emitter.complete();
                     } catch (Exception e) {
@@ -181,7 +204,7 @@ public class ChatServiceImpl implements ChatService {
                     }
                 })
                 .doOnError(e -> {
-                    log.error("SSE stream error", e);
+                    log.error("SSE stream error for session {}: {}", sessionId, e.getMessage());
                     try {
                         emitter.send(SseEmitter.event().name("error")
                                 .data("{\"code\":\"500\",\"message\":\"AI回复失败，请稍后重试\"}"));

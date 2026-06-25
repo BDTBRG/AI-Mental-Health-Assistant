@@ -1,4 +1,4 @@
-<template>
+﻿<template>
 	<div class="consultation-container">
 		<div class="sidebar">
 			<div class="ai-assistant-info">
@@ -288,14 +288,14 @@ const messageList = ref<Message[]>([])
 const sessionList = ref<HistorySession[]>([])
 
 const currentEmotion = ref<EmotionAnalysis>({
-	primaryEmotion: '中性',
+	primaryEmotion: '等待分析',
 	emotionScore: 50,
 	isNegative: false,
 	riskLevel: 0,
-	suggestion: '保持积极的心态，尝试做一些喜欢的活动来提升情绪',
+	suggestion: '开始对话后，AI将实时分析你的情绪状态',
 	improvementSuggestions: [],
 	riskDescription:
-		'您的情绪状态显示需要关注，建议您多与朋友家人交流，保持良好的作息习惯，如果情绪持续低落，请考虑寻求专业心理帮助',
+		'尚未开始分析',
 })
 
 const createNewSession = async () => {
@@ -522,11 +522,20 @@ const getRiskText = (level: number): string => {
 }
 
 const getCurrentEmotion = async (sessionId: string) => {
+	if (sessionId.startsWith('temp_')) {
+		return
+	}
 	sessionId =
-		sessionId.startsWith('session_') ? sessionId : `session_${sessionId}`
-	const data = await getEmotionAnalysis(sessionId)
-	console.log('情绪分析数据：', data)
-	currentEmotion.value = data
+		sessionId.startsWith('session_') ? sessionId : `session_${"${"}sessionId}`
+	try {
+		const data = await getEmotionAnalysis(sessionId)
+		console.log('情绪分析数据：', data)
+		if (data && data.primaryEmotion) {
+			currentEmotion.value = data
+		}
+	} catch {
+		// 静默失败，保持默认值
+	}
 }
 
 onMounted(() => {

@@ -6,7 +6,7 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://localhost:3306/amha?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&createDatabaseIfNotExist=true
     username: root
-    password: ${MYSQL_PASSWORD:your_mysql_password}
+    password: your_mysql_password
 
   data:
     redis:
@@ -33,7 +33,7 @@ mybatis-plus:
       logic-not-delete-value: 0
 
 jwt:
-  secret: ${JWT_SECRET:your_jwt_secret_key_change_me}
+  secret: your_jwt_secret_key_change_me
   expiration: 86400000
 
 # File upload config

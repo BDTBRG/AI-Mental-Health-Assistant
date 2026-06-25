@@ -1,6 +1,7 @@
 package com.amha.service.impl;
 
 import cn.hutool.core.util.StrUtil;
+import com.amha.agent.RealChatAgent;
 import com.amha.common.BusinessException;
 import com.amha.common.PageResult;
 import com.amha.dto.EmotionDiaryPageQuery;
@@ -15,18 +16,25 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class EmotionDiaryServiceImpl implements EmotionDiaryService {
 
     private final EmotionDiaryMapper diaryMapper;
     private final UserMapper userMapper;
+    private final RealChatAgent realChatAgent;
 
     @Override
     public void submitDiary(EmotionDiaryRequest request, Long userId) {
@@ -42,6 +50,39 @@ public class EmotionDiaryServiceImpl implements EmotionDiaryService {
         diary.setHasAiEmotionAnalysis(0);
         diary.setAiAnalysisStatus("PENDING");
         diaryMapper.insert(diary);
+
+        // 异步触发AI分析
+        triggerAiAnalysis(diary);
+    }
+
+    /**
+     * 异步调用Python Agent进行日记情感分析
+     */
+    @Async
+    public void triggerAiAnalysis(EmotionDiary diary) {
+        try {
+            Map<String, Object> diaryData = new LinkedHashMap<>();
+            diaryData.put("dominantEmotion", diary.getDominantEmotion());
+            diaryData.put("moodScore", diary.getMoodScore());
+            diaryData.put("emotionTriggers", diary.getEmotionTriggers());
+            diaryData.put("diaryContent", diary.getDiaryContent());
+            diaryData.put("sleepQuality", diary.getSleepQuality() != null ? diary.getSleepQuality() : "");
+            diaryData.put("stressLevel", diary.getStressLevel() != null ? diary.getStressLevel() : "");
+
+            String analysis = realChatAgent.analyzeDiary(diaryData).block();
+            if (analysis != null && !analysis.isEmpty()) {
+                diary.setAiEmotionAnalysis(analysis);
+                diary.setHasAiEmotionAnalysis(1);
+                diary.setAiAnalysisStatus("COMPLETED");
+                diary.setAiAnalysisUpdatedAt(LocalDateTime.now());
+            } else {
+                diary.setAiAnalysisStatus("FAILED");
+            }
+        } catch (Exception e) {
+            log.error("AI diary analysis failed for diary {}: {}", diary.getId(), e.getMessage());
+            diary.setAiAnalysisStatus("FAILED");
+        }
+        diaryMapper.updateById(diary);
     }
 
     @Override
@@ -63,8 +104,43 @@ public class EmotionDiaryServiceImpl implements EmotionDiaryService {
 
         Page<EmotionDiary> page = new Page<>(query.getCurrentPage(), query.getSize());
         IPage<EmotionDiary> result = diaryMapper.selectPage(page, wrapper);
+        List<EmotionDiaryVO> records = convertToVOList(result.getRecords());
+        return PageResult.of(records, result.getCurrent(), result.getSize(), result.getTotal());
+    }
 
-        List<EmotionDiaryVO> records = result.getRecords().stream().map(diary -> {
+    @Override
+    public void deleteAdmin(Long id) {
+        EmotionDiary diary = diaryMapper.selectById(id);
+        if (diary == null) {
+            throw new BusinessException("日记不存在");
+        }
+        diaryMapper.deleteById(id);
+    }
+
+    @Override
+    public List<EmotionDiaryVO> getUserDiaries(Long userId) {
+        LambdaQueryWrapper<EmotionDiary> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(EmotionDiary::getUserId, userId);
+        wrapper.orderByDesc(EmotionDiary::getCreatedAt);
+        wrapper.last("LIMIT 30");
+        List<EmotionDiary> diaries = diaryMapper.selectList(wrapper);
+        return convertToVOList(diaries);
+    }
+
+    @Override
+    public void triggerPendingAnalysis() {
+        LambdaQueryWrapper<EmotionDiary> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(EmotionDiary::getAiAnalysisStatus, "PENDING");
+        wrapper.last("LIMIT 20");
+        List<EmotionDiary> pending = diaryMapper.selectList(wrapper);
+        log.info("Triggering analysis for {} pending diaries", pending.size());
+        for (EmotionDiary diary : pending) {
+            triggerAiAnalysis(diary);
+        }
+    }
+
+    private List<EmotionDiaryVO> convertToVOList(List<EmotionDiary> diaries) {
+        return diaries.stream().map(diary -> {
             User user = userMapper.selectById(diary.getUserId());
             return EmotionDiaryVO.builder()
                     .id(diary.getId())
@@ -90,16 +166,5 @@ public class EmotionDiaryServiceImpl implements EmotionDiaryService {
                     .updatedAt(diary.getUpdatedAt())
                     .build();
         }).collect(Collectors.toList());
-
-        return PageResult.of(records, result.getCurrent(), result.getSize(), result.getTotal());
-    }
-
-    @Override
-    public void deleteAdmin(Long id) {
-        EmotionDiary diary = diaryMapper.selectById(id);
-        if (diary == null) {
-            throw new BusinessException("日记不存在");
-        }
-        diaryMapper.deleteById(id);
     }
 }

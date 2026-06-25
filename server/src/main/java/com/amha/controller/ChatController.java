@@ -61,7 +61,8 @@ public class ChatController {
     }
 
     @GetMapping("/session/{sessionId}/emotion")
-    public Result<Map<String, Object>> getSessionEmotion(@PathVariable Long sessionId) {
-        return Result.success(chatService.getSessionEmotion(sessionId));
+    public Result<Map<String, Object>> getSessionEmotion(@PathVariable String sessionId) {
+        Long sid = Long.parseLong(sessionId.replace("session_", ""));
+        return Result.success(chatService.getSessionEmotion(sid));
     }
 }

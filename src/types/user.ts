@@ -71,10 +71,33 @@ export interface EmotionDiaryQuery {
 	stressLevel: number | null
 }
 
+// 情绪日记数据（含AI分析）
+export interface EmotionDiaryVO {
+	id: number
+	userId: number
+	username: string
+	nickname: string
+	diaryDate: string
+	moodScore: number
+	dominantEmotion: string
+	emotionTriggers: string
+	diaryContent: string
+	diaryContentPreview: string
+	sleepQuality: number
+	stressLevel: number
+	aiEmotionAnalysis: string
+	aiAnalysisUpdatedAt: string
+	hasAiEmotionAnalysis: boolean
+	aiAnalysisStatus: string
+	contentLength: number
+	createdAt: string
+	updatedAt: string
+}
+
 // 查询知识库文章列表提交参数
 export interface KnowledgeArticleQuery {
 	currentPage: string
-	size: string
+	pageSize: string
 	sortDirection: string
 	sortField: string
 }

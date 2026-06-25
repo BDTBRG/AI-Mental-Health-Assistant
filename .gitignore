@@ -1,4 +1,4 @@
-# ── Logs ────────────────────────────────────────────────
+# --- Logs ---
 logs
 *.log
 npm-debug.log*
@@ -7,7 +7,7 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-# ── Frontend ────────────────────────────────────────────
+# --- Frontend ---
 node_modules
 dist
 dist-ssr
@@ -18,24 +18,22 @@ auto-imports.d.ts
 components.d.ts
 *.tsbuildinfo
 
-# ── Backend (Java) ──────────────────────────────────────
-backend/target/
-backend/.mvn/
-backend/mvnw
-backend/mvnw.cmd
-backend/*.jar.original
+# --- Backend (Java) ---
+server/target/
+server/.mvn/
+server/mvnw
+server/mvnw.cmd
+server/*.jar.original
+server/uploads/
+server/*.log
 
-# ── Agent (Python) ──────────────────────────────────────
+# --- Agent (Python) ---
 **/__pycache__/
 agent/.pytest_cache/
 agent/*.pyc
 agent/.env
 
-# ── Uploaded files ──────────────────────────────────────
-backend/uploads/*
-!backend/uploads/.gitkeep
-
-# ── IDE / Editor ────────────────────────────────────────
+# --- IDE / Editor ---
 .vscode/*
 !.vscode/extensions.json
 .idea
@@ -46,7 +44,7 @@ backend/uploads/*
 *.sln
 *.sw?
 
-# ── Extracted dependency directories (accidental) ───────
+# --- Extracted dependency directories (accidental) ---
 aopalliance/
 ch/
 com/
@@ -56,3 +54,14 @@ jakarta/
 javax/
 net/
 org/
+server/aopalliance/
+server/ch/
+server/cn/
+server/com/
+server/commons-codec/
+server/commons-io/
+server/io/
+server/jakarta/
+server/javax/
+server/net/
+server/org/

@@ -69,7 +69,9 @@ export function deleteArticle(id: number): Promise<void> {
 export function getConsultationSessionPage(
 	params: ConsultationSearchParams,
 ): Promise<ListData<ConsultationSessionItem>> {
-	return request.get('/psychological-chat/sessions', { params })
+	return request.get('/psychological-chat/sessions', {
+		params: { pageNum: params.currentPage || 1, pageSize: params.size || 10 },
+	})
 }
 
 export function getConsultationSessionDetail(
@@ -81,7 +83,13 @@ export function getConsultationSessionDetail(
 export function getEmotionlogPage(
 	params: ConsultationSearchParams,
 ): Promise<ListData<EmotionLogItem>> {
-	return request.get('/emotion-diary/admin/page', { params })
+	return request.get('/emotion-diary/admin/page', {
+		params: {
+			current: params.currentPage || 1,
+			size: params.size || 10,
+			dominantEmotion: params.emotionTag,
+		},
+	})
 }
 
 export function deleteEmotionLog(id: number): Promise<void> {

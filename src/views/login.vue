@@ -10,12 +10,13 @@
 				<p>请输入您的登录信息</p>
 			</div>
 			<div class="form-container">
-				<el-form
-					ref="formRef"
-					:model="formData"
-					:rules="rules"
-					class="login-form"
-					label-position="top">
+		<el-form
+			ref="formRef"
+			:model="formData"
+			:rules="rules"
+			class="login-form"
+			@submit.prevent
+			label-position="top">
 					<el-form-item label="用户名或邮箱" prop="username">
 						<el-input
 							v-model="formData.username"
@@ -77,20 +78,22 @@ const submitForm = async (formEl: FormInstance | undefined) => {
 	if (!formEl) return
 	await formEl.validate(async (valid, fields) => {
 		if (valid) {
-			login(formData).then(data => {
-				if (!data.token) {
-					return ElMessage.error('登录失败，请检查用户名和密码')
+		login(formData).then(data => {
+			if (!data.token) {
+				return ElMessage.error('登录失败，请检查用户名和密码')
+			}
+			localStorage.setItem('token', data.token)
+			localStorage.setItem('userInfo', JSON.stringify(data.userInfo))
+			ElMessage.success('登录成功')
+			setTimeout(() => {
+				if (data.userInfo.userType === 1) {
+					window.location.href = '/'
+				} else if (data.userInfo.userType === 2) {
+					window.location.href = '/back/dashboard'
 				}
-				localStorage.setItem('token', data.token)
-				localStorage.setItem('userInfo', JSON.stringify(data.userInfo))
-				ElMessage.success('登录成功')
-				setTimeout(() => {
-					if (data.userInfo.userType === 1) {
-						window.location.href = '/'
-					} else if (data.userInfo.userType === 2) {
-						window.location.href = '/back/dashboard'
-					}
-				}, 1000)
+			}, 1000)
+		}).catch(() => {
+			// 错误已由拦截器统一提示
 			})
 		} else {
 			console.log('error submit!', fields)
