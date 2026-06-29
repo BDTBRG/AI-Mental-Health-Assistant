@@ -1,4 +1,4 @@
-// 搜索表单子项配置
+﻿// 搜索表单子项配置
 export interface FormItemConfig {
 	comp: 'el-input' | 'el-select'
 	prop: string

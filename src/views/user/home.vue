@@ -1,4 +1,4 @@
-<template>
+﻿<template>
 	<div class="home-container">
 		<div class="content">
 			<div class="text">

@@ -1,4 +1,4 @@
-<template>
+﻿<template>
 	<div>
 		<PageHead title="情绪日志" />
 		<TableSearch :formItem="formItem" @search="handleSearch" />

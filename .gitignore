@@ -45,6 +45,10 @@ agent/.env
 *.sw?
 
 # --- Extracted dependency directories (accidental) ---
+
+# --- Build caches ---
+.pnpm-store/
+.vite/
 aopalliance/
 ch/
 com/

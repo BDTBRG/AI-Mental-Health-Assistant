@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="rich-text-editor">
     <!-- 富文本编辑器 -->
     <div class="editor-container">
