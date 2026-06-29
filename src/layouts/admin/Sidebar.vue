@@ -4,9 +4,12 @@
 			default-active="dashboard"
 			class="el-menu-vertical-demo"
 			:collapse="isCollapse"
-      :collapse-transition="false">
+			:collapse-transition="false">
 			<div class="brand">
-				<el-image style="width: 50px; height: 50px" :src="iconUrl" alt="logo" />
+				<el-image
+					style="width: 50px; height: 50px"
+					:src="iconUrl"
+					alt="logo" />
 				<div v-show="!isCollapse" class="info-card">
 					<h1 class="brand-title">心理健康AI助手</h1>
 					<p class="brand-subtitle">管理后台</p>
@@ -27,7 +30,7 @@
 <script setup lang="ts">
 import { useRouter } from 'vue-router'
 import iconUrl from '@/assets/机器人.png'
-import { useAdminStore } from '@/stores/admin'
+import { useAdminStore } from '@/stores/appStore'
 import { computed } from 'vue'
 
 const router = useRouter()
@@ -35,8 +38,8 @@ const router = useRouter()
 const isCollapse = computed(() => useAdminStore().isCollapse)
 
 const selectMenu = (key: { index: string }) => {
-  const currentRoute = router.options.routes[1]
-  router.push(currentRoute.path + '/' + key.index)
+	const currentRoute = router.options.routes[1]
+	router.push(currentRoute.path + '/' + key.index)
 }
 </script>
 

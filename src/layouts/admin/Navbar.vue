@@ -27,7 +27,7 @@
 
 <script setup lang="ts">
 import { ElMessageBox } from 'element-plus'
-import { useAdminStore } from '@/stores/admin'
+import { useAdminStore } from '@/stores/appStore'
 import userImg from '@/assets/user.jpg'
 import { useRoute, useRouter } from 'vue-router'
 import { logout } from '@/api/admin'
@@ -37,21 +37,16 @@ const router = useRouter()
 
 const handleCommand = (command: string) => {
 	if (command === 'layout') {
-		ElMessageBox.confirm(
-			'确定要退出登录吗？',
-			'提示',
-			{
-				confirmButtonText: '确定',
-				cancelButtonText: '取消',
-				type: 'warning',
-			}
-		)
-			.then(async () => {
-				await logout()
-				localStorage.removeItem('token')
-				localStorage.removeItem('userInfo')
-				router.push('/auth/login')
-			})
+		ElMessageBox.confirm('确定要退出登录吗？', '提示', {
+			confirmButtonText: '确定',
+			cancelButtonText: '取消',
+			type: 'warning',
+		}).then(async () => {
+			await logout()
+			localStorage.removeItem('token')
+			localStorage.removeItem('userInfo')
+			router.push('/auth/login')
+		})
 	}
 }
 
