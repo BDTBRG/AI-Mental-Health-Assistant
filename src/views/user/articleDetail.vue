@@ -1,4 +1,4 @@
-<template>
+﻿<template>
 	<div class="articleDetail-container">
 		<div class="header-section">
 			<div class="header-content">

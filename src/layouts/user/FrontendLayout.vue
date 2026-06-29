@@ -1,4 +1,4 @@
-<template>
+﻿<template>
 	<div class="frontend-layout">
 		<div class="navbar-container">
 			<div class="brand-section">

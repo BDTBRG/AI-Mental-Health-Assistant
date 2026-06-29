@@ -1,4 +1,4 @@
-<template>
+﻿<template>
 	<el-dialog
 		v-model="dialogVisible"
 		:title="isEdit ? '编辑文章' : '文章详情'"

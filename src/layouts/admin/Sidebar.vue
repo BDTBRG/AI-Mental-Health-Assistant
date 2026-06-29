@@ -1,4 +1,4 @@
-<template>
+﻿<template>
 	<el-aside :width="isCollapse ? '64px' : '264px'">
 		<el-menu
 			default-active="dashboard"

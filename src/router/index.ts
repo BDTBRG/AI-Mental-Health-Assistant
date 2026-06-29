@@ -1,4 +1,4 @@
-import AuthLayout from '@/layouts/AuthLayout.vue'
+﻿import AuthLayout from '@/layouts/AuthLayout.vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
 

@@ -1,4 +1,4 @@
-// 注册提交数据
+﻿// 注册提交数据
 export interface RegisterFormQuery {
 	username: string
 	email: string

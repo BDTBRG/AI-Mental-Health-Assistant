@@ -1,4 +1,4 @@
-<template>
+﻿<template>
 	<div>
 		<PageHead title="知识文章">
 			<template #buttons>

@@ -1,4 +1,4 @@
-<template>
+﻿<template>
 	<div class="navbar">
 		<div class="flex-box">
 			<el-button @click="handleCollapse">

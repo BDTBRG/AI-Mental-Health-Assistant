@@ -1,4 +1,4 @@
-<template>
+﻿<template>
 	<div>
 		<PageHead title="咨询记录" />
 		<el-table :data="tableData" style="width: 100%">
