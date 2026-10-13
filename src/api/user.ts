@@ -11,6 +11,7 @@ import type {
 	KnowledgeArticle,
 	KnowledgeArticleQuery,
 	KnowledgeArticleDetail,
+	AgentMemoryItem,
 } from '@/types/user'
 
 export function register(
@@ -22,8 +23,45 @@ export function register(
 export function startSession(data: {
 	initialMessage: string
 	sessionTitle: string
+	reviewConsent: boolean
 }): Promise<StartSession> {
 	return request.post('/psychological-chat/session/start', data)
+}
+
+export function updateReviewConsent(sessionId: string, allowed: boolean): Promise<void> {
+	return request.put(`/psychological-chat/sessions/${sessionId}/review-consent`, { allowed })
+}
+
+export function requestHumanReview(sessionId: string): Promise<void> {
+	return request.post(`/psychological-chat/sessions/${sessionId}/review-request`)
+}
+
+export function getPersonalizationConsent(): Promise<{ enabled: boolean }> {
+	return request.get('/psychological-chat/memories/consent')
+}
+
+export function setPersonalizationConsent(allowed: boolean): Promise<void> {
+	return request.put('/psychological-chat/memories/consent', { allowed })
+}
+
+export function getAgentMemories(): Promise<AgentMemoryItem[]> {
+	return request.get('/psychological-chat/memories')
+}
+
+export function createAgentMemory(data: { content: string; expiresAt: string | null }): Promise<AgentMemoryItem> {
+	return request.post('/psychological-chat/memories', data)
+}
+
+export function updateAgentMemory(id: number, data: { content: string; expiresAt: string | null }): Promise<void> {
+	return request.put(`/psychological-chat/memories/${id}`, data)
+}
+
+export function deleteAgentMemory(id: number): Promise<void> {
+	return request.delete(`/psychological-chat/memories/${id}`)
+}
+
+export function clearAgentMemories(): Promise<void> {
+	return request.delete('/psychological-chat/memories')
 }
 
 export function getHistorySessionList(params: {
@@ -56,6 +94,10 @@ export function submitEmotionDiary(data: EmotionDiaryQuery): Promise<void> {
 /** 获取用户自己的情绪日记列表（含AI分析） */
 export function getMyDiaries(): Promise<EmotionDiaryVO[]> {
 	return request.get('/emotion-diary/my')
+}
+
+export function deleteMyEmotionDiary(id: number): Promise<void> {
+	return request.delete(`/emotion-diary/my/${id}`)
 }
 
 export function getKnowledgeArticlesList(

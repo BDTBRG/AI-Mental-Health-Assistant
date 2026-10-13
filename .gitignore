@@ -32,6 +32,8 @@ server/*.log
 agent/.pytest_cache/
 agent/*.pyc
 agent/.env
+agent/.venv/
+agent/data/
 
 # --- IDE / Editor ---
 .vscode/*
@@ -69,3 +71,8 @@ server/jakarta/
 server/javax/
 server/net/
 server/org/
+
+# Application Java sources live under a package named `com`; do not treat them as extracted dependencies.
+!/server/src/main/java/com/
+!/server/src/main/java/com/amha/
+!/server/src/main/java/com/amha/**/*.java

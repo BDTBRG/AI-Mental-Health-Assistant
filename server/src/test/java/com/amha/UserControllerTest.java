@@ -160,4 +160,36 @@ class UserControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value("-1"));
     }
+
+    @Test
+    @Order(9)
+    @DisplayName("公开注册不能授予管理员角色")
+    void testPublicRegistrationCannotGrantAdminRole() throws Exception {
+        RegisterRequest request = new RegisterRequest();
+        request.setUsername("selfadmin");
+        request.setPassword("pass123");
+        request.setConfirmPassword("pass123");
+        request.setEmail("selfadmin@test.com");
+        request.setGender(1);
+        request.setUserType(2);
+
+        mockMvc.perform(post("/user/add")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("200"));
+
+        LoginRequest login = new LoginRequest();
+        login.setUsername("selfadmin");
+        login.setPassword("pass123");
+        mockMvc.perform(post("/user/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(login)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.roleType").value("USER"));
+
+        mockMvc.perform(get("/data-analytics/overview").header("token", token))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("403"));
+    }
 }

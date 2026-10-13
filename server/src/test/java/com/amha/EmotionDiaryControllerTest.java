@@ -7,11 +7,13 @@ import com.amha.dto.RegisterRequest;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.*;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.util.List;
 import java.util.Map;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
@@ -27,6 +29,9 @@ class EmotionDiaryControllerTest {
 
     @Autowired
     private ObjectMapper objectMapper;
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
 
     private static String userToken;
     private static String adminToken;
@@ -63,21 +68,9 @@ class EmotionDiaryControllerTest {
             userToken = (String) dataMap.get("token");
         }
         if (adminToken == null) {
-            // 注册管理员
-            RegisterRequest regReq = new RegisterRequest();
-            regReq.setUsername("diaryadmin");
-            regReq.setPassword("test123");
-            regReq.setConfirmPassword("test123");
-            regReq.setEmail("diaryadmin@test.com");
-            regReq.setGender(1);
-            regReq.setUserType(2);
-            mockMvc.perform(post("/user/add")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .content(objectMapper.writeValueAsString(regReq)));
-
             LoginRequest loginReq = new LoginRequest();
-            loginReq.setUsername("diaryadmin");
-            loginReq.setPassword("test123");
+            loginReq.setUsername("admin");
+            loginReq.setPassword("admin123");
             String resp = mockMvc.perform(post("/user/login")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(loginReq)))
@@ -121,6 +114,17 @@ class EmotionDiaryControllerTest {
                 .andExpect(jsonPath("$.code").value("200"))
                 .andExpect(jsonPath("$.data.records").isArray())
                 .andExpect(jsonPath("$.data.total").isNumber());
+
+        mockMvc.perform(get("/emotion-diary/admin/page")
+                        .header("token", userToken)
+                        .param("currentPage", "1")
+                        .param("size", "10"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("403"));
+
+        Assertions.assertTrue(jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM emotion_diary_access_audit WHERE action = 'ADMIN_READ'",
+                Integer.class) > 0);
     }
 
     @Test
@@ -138,6 +142,27 @@ class EmotionDiaryControllerTest {
 
     @Test
     @Order(4)
+    @DisplayName("用户只能删除自己的情绪日记及待处理分析任务")
+    void testOwnerCanDeleteOwnDiary() throws Exception {
+        String response = mockMvc.perform(get("/emotion-diary/my").header("token", userToken))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        Result<?> result = objectMapper.readValue(response, Result.class);
+        List<Map<String, Object>> diaries = (List<Map<String, Object>>) result.getData();
+        Assertions.assertFalse(diaries.isEmpty());
+        Long diaryId = ((Number) diaries.get(0).get("id")).longValue();
+
+        mockMvc.perform(delete("/emotion-diary/my/" + diaryId).header("token", userToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("200"));
+        Assertions.assertEquals(0, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM emotion_diary WHERE id = ?", Integer.class, diaryId));
+        Assertions.assertEquals(0, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM emotion_analysis_outbox WHERE diary_id = ?", Integer.class, diaryId));
+    }
+
+    @Test
+    @Order(5)
     @DisplayName("管理员删除情绪日记")
     void testAdminDelete() throws Exception {
         // 先获取日记列表拿到ID

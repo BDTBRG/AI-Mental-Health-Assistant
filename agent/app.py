@@ -6,18 +6,22 @@ RAG: FAISS + Sentence-Transformers with persistent index on disk.
 
 import json
 import logging
-from typing import List, Optional
+import os
+import hmac
+from typing import Any, Dict, List, Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 import config
 from services.agent_service import agent_chat_service
 from services.emotion_service import emotion_service
 from services.diary_service import diary_service
 from services.rag_service import rag_service
+from tools.mental_health_tools import CURRENT_AGENT_CONTEXT
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,10 +37,24 @@ async def lifespan(app: FastAPI):
         logger.info(f"FAISS 索引加载成功: {rag_service.total_vectors} 个向量, {rag_service.total_articles} 篇文章")
     else:
         logger.info("未找到已有索引，等待 Spring Boot 推送知识库数据进行重建")
-    yield
+    os.makedirs(os.path.dirname(config.AGENT_CHECKPOINT_DB) or ".", exist_ok=True)
+    async with AsyncSqliteSaver.from_conn_string(config.AGENT_CHECKPOINT_DB) as checkpointer:
+        agent_chat_service.configure_checkpointer(checkpointer)
+        try:
+            yield
+        finally:
+            agent_chat_service.clear_checkpointer()
 
 
 app = FastAPI(title="AI Mental Health Agent", version="1.0.0", lifespan=lifespan)
+
+
+def require_internal_token(x_agent_token: str = Header(default="")) -> None:
+    expected_token = config.AGENT_INTERNAL_TOKEN
+    if not expected_token:
+        raise HTTPException(status_code=503, detail="Agent internal token is not configured")
+    if not hmac.compare_digest(x_agent_token, expected_token):
+        raise HTTPException(status_code=403, detail="Forbidden")
 
 
 class ChatMessage(BaseModel):
@@ -45,13 +63,16 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     sessionId: str
-    messages: List[ChatMessage] = []
+    messages: List[ChatMessage] = Field(default_factory=list)
     userMessage: str
+    context: Dict[str, Any] = Field(default_factory=dict)
 
 class EmotionRequest(BaseModel):
+    userId: Optional[str] = None
     messages: List[ChatMessage]
 
 class DiaryRequest(BaseModel):
+    userId: Optional[str] = None
     dominantEmotion: str = ""
     moodScore: Optional[int] = None
     emotionTriggers: str = ""
@@ -75,12 +96,20 @@ async def health():
     return {"status": "ok", "service": "AI Mental Health Agent"}
 
 
+@app.delete("/api/agent/sessions/{session_id}/checkpoint")
+async def delete_session_checkpoint(session_id: str, x_agent_token: str = Header(default="")):
+    require_internal_token(x_agent_token)
+    await agent_chat_service.purge_session(session_id)
+    return {"code": "200", "data": {"deleted": True}}
+
+
 @app.post("/api/agent/chat")
-async def agent_chat(request: ChatRequest):
+async def agent_chat(request: ChatRequest, _authorized: None = Depends(require_internal_token)):
     messages_dict = [{"senderType": m.senderType, "content": m.content} for m in request.messages]
 
     async def generate_lines():
         full_response = ""
+        context_token = CURRENT_AGENT_CONTEXT.set(request.context)
         try:
             async for chunk in agent_chat_service.stream_chat(messages_dict, request.userMessage):
                 full_response += chunk
@@ -100,9 +129,12 @@ async def agent_chat(request: ChatRequest):
             logger.error(f"Chat stream error: {e}")
             error_line = json.dumps({
                 "code": "500",
-                "data": {"content": f"[AI error: {str(e)}]", "done": True, "fullResponse": ""}
+                "message": "AI回复暂时不可用",
+                "data": {"done": True}
             }, ensure_ascii=False)
             yield error_line + "\n"
+        finally:
+            CURRENT_AGENT_CONTEXT.reset(context_token)
 
     return StreamingResponse(
         generate_lines(),
@@ -112,10 +144,12 @@ async def agent_chat(request: ChatRequest):
 
 
 @app.post("/api/agent/emotion/analyze")
-async def agent_emotion_analyze(request: EmotionRequest):
+async def agent_emotion_analyze(request: EmotionRequest, _authorized: None = Depends(require_internal_token)):
     messages_dict = [{"senderType": m.senderType, "content": m.content} for m in request.messages]
     try:
-        result = await emotion_service.analyze_emotion(messages_dict)
+        result = await emotion_service.analyze_emotion(
+            messages_dict, request_context={"userId": request.userId}
+        )
         return {"code": "200", "data": result}
     except Exception as e:
         logger.error(f"Emotion analysis error: {e}")
@@ -123,7 +157,7 @@ async def agent_emotion_analyze(request: EmotionRequest):
 
 
 @app.post("/api/agent/diary/analyze")
-async def agent_diary_analyze(request: DiaryRequest):
+async def agent_diary_analyze(request: DiaryRequest, _authorized: None = Depends(require_internal_token)):
     diary_dict = request.model_dump()
     try:
         analysis = await diary_service.analyze_diary(diary_dict)
@@ -136,7 +170,7 @@ async def agent_diary_analyze(request: DiaryRequest):
 # ========== RAG 索引管理端点 ==========
 
 @app.post("/api/agent/rag/rebuild")
-async def rag_rebuild(request: RAGRebuildRequest):
+async def rag_rebuild(request: RAGRebuildRequest, _authorized: None = Depends(require_internal_token)):
     """全量重建 FAISS 索引。Spring Boot 在知识库文章增删改后调用。"""
     articles = [a.model_dump() for a in request.articles]
     try:
@@ -149,7 +183,7 @@ async def rag_rebuild(request: RAGRebuildRequest):
 
 
 @app.post("/api/agent/rag/article/add")
-async def rag_article_add(article: RAGArticle):
+async def rag_article_add(article: RAGArticle, _authorized: None = Depends(require_internal_token)):
     """增量添加单篇文章到索引"""
     try:
         rag_service.add_article(article.id, article.title, article.content)
@@ -160,7 +194,7 @@ async def rag_article_add(article: RAGArticle):
 
 
 @app.delete("/api/agent/rag/article/{article_id}")
-async def rag_article_remove(article_id: int):
+async def rag_article_remove(article_id: int, _authorized: None = Depends(require_internal_token)):
     """按 ID 删除文章的所有分块"""
     try:
         rag_service.remove_article(article_id)
@@ -171,7 +205,8 @@ async def rag_article_remove(article_id: int):
 
 
 @app.put("/api/agent/rag/article/{article_id}")
-async def rag_article_update(article_id: int, article: RAGArticle):
+async def rag_article_update(article_id: int, article: RAGArticle,
+                             _authorized: None = Depends(require_internal_token)):
     """更新单篇文章（先删后加）"""
     try:
         rag_service.update_article(article_id, article.title, article.content)
@@ -182,13 +217,13 @@ async def rag_article_update(article_id: int, article: RAGArticle):
 
 
 @app.get("/api/agent/rag/stats")
-async def rag_stats():
+async def rag_stats(_authorized: None = Depends(require_internal_token)):
     """查询索引状态"""
     return {"code": "200", "data": rag_service.get_stats()}
 
 
 @app.post("/api/agent/rag/search")
-async def rag_search(query: str, top_k: int = 3):
+async def rag_search(query: str, top_k: int = 3, _authorized: None = Depends(require_internal_token)):
     """直接语义检索（调试用，生产由 function calling 调用）"""
     results = rag_service.search(query, top_k)
     return {"code": "200", "data": results}

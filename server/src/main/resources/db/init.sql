@@ -74,6 +74,13 @@ CREATE TABLE IF NOT EXISTS `consultation_session` (
     `message_count` INT DEFAULT 0,
     `last_message_content` VARCHAR(1000) DEFAULT NULL,
     `last_message_time` DATETIME DEFAULT NULL,
+    `review_consent` TINYINT NOT NULL DEFAULT 0,
+    `review_consent_updated_at` DATETIME DEFAULT NULL,
+    `review_status` VARCHAR(20) NOT NULL DEFAULT 'NONE',
+    `review_assignee_id` BIGINT DEFAULT NULL,
+    `review_version` INT NOT NULL DEFAULT 0,
+    `review_requested_at` DATETIME DEFAULT NULL,
+    `review_updated_at` DATETIME DEFAULT NULL,
     `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
@@ -90,6 +97,46 @@ CREATE TABLE IF NOT EXISTS `consultation_message` (
     `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
     KEY `idx_session_id` (`session_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `consultation_chat_turn` (
+    `id` BIGINT NOT NULL AUTO_INCREMENT,
+    `session_id` BIGINT NOT NULL,
+    `client_request_id` VARCHAR(64) NOT NULL,
+    `request_hash` CHAR(64) NOT NULL,
+    `status` VARCHAR(20) NOT NULL DEFAULT 'RUNNING',
+    `generation_token` CHAR(36) NOT NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_chat_turn_request` (`session_id`, `client_request_id`),
+    KEY `idx_chat_turn_status_updated` (`status`, `updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `consultation_stream_event` (
+    `id` BIGINT NOT NULL AUTO_INCREMENT,
+    `session_id` BIGINT NOT NULL,
+    `client_request_id` VARCHAR(64) NOT NULL,
+    `sequence` INT NOT NULL,
+    `event_type` VARCHAR(20) NOT NULL,
+    `payload` TEXT NOT NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_stream_event_sequence` (`session_id`, `client_request_id`, `sequence`),
+    KEY `idx_stream_event_replay` (`session_id`, `client_request_id`, `id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `consultation_review_audit` (
+    `id` BIGINT NOT NULL AUTO_INCREMENT,
+    `session_id` BIGINT NOT NULL,
+    `actor_user_id` BIGINT NOT NULL,
+    `action` VARCHAR(40) NOT NULL,
+    `from_status` VARCHAR(20) DEFAULT NULL,
+    `to_status` VARCHAR(20) DEFAULT NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `idx_review_audit_session` (`session_id`),
+    KEY `idx_review_audit_actor` (`actor_user_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS `emotion_diary` (
@@ -111,4 +158,87 @@ CREATE TABLE IF NOT EXISTS `emotion_diary` (
     PRIMARY KEY (`id`),
     KEY `idx_user_id` (`user_id`),
     KEY `idx_diary_date` (`diary_date`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `emotion_analysis_outbox` (
+    `id` BIGINT NOT NULL AUTO_INCREMENT,
+    `diary_id` BIGINT NOT NULL,
+    `status` VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+    `attempts` INT NOT NULL DEFAULT 0,
+    `next_attempt_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `lease_until` DATETIME DEFAULT NULL,
+    `lease_token` VARCHAR(36) DEFAULT NULL,
+    `last_error` VARCHAR(64) DEFAULT NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_emotion_outbox_diary` (`diary_id`),
+    KEY `idx_emotion_outbox_ready` (`status`, `next_attempt_at`, `lease_until`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `agent_memory_settings` (
+    `user_id` BIGINT NOT NULL,
+    `personalization_enabled` TINYINT NOT NULL DEFAULT 0,
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `agent_memory` (
+    `id` BIGINT NOT NULL AUTO_INCREMENT,
+    `user_id` BIGINT NOT NULL,
+    `content` VARCHAR(1000) NOT NULL,
+    `source_type` VARCHAR(30) NOT NULL DEFAULT 'USER_ENTERED',
+    `expires_at` DATE DEFAULT NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `idx_agent_memory_user_expiry` (`user_id`, `expires_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `knowledge_index_outbox` (
+    `id` BIGINT NOT NULL AUTO_INCREMENT,
+    `article_id` BIGINT NOT NULL,
+    `desired_version` BIGINT NOT NULL DEFAULT 1,
+    `processing_version` BIGINT DEFAULT NULL,
+    `status` VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+    `attempts` INT NOT NULL DEFAULT 0,
+    `next_attempt_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `lease_until` DATETIME DEFAULT NULL,
+    `lease_token` VARCHAR(36) DEFAULT NULL,
+    `last_error` VARCHAR(64) DEFAULT NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_knowledge_index_article` (`article_id`),
+    KEY `idx_knowledge_index_ready` (`status`, `next_attempt_at`, `lease_until`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `agent_checkpoint_purge_outbox` (
+    `id` BIGINT NOT NULL AUTO_INCREMENT,
+    `session_id` BIGINT NOT NULL,
+    `user_id` BIGINT NOT NULL,
+    `desired_version` BIGINT NOT NULL DEFAULT 1,
+    `processing_version` BIGINT DEFAULT NULL,
+    `status` VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+    `attempts` INT NOT NULL DEFAULT 0,
+    `next_attempt_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `lease_until` DATETIME DEFAULT NULL,
+    `lease_token` VARCHAR(36) DEFAULT NULL,
+    `last_error` VARCHAR(64) DEFAULT NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_agent_purge_session` (`session_id`),
+    KEY `idx_agent_purge_ready` (`status`, `next_attempt_at`, `lease_until`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `emotion_diary_access_audit` (
+    `id` BIGINT NOT NULL AUTO_INCREMENT,
+    `diary_id` BIGINT NOT NULL,
+    `actor_user_id` BIGINT NOT NULL,
+    `action` VARCHAR(30) NOT NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `idx_diary_audit_subject` (`diary_id`, `created_at`),
+    KEY `idx_diary_audit_actor` (`actor_user_id`, `created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

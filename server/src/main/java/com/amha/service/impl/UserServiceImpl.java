@@ -70,6 +70,8 @@ public class UserServiceImpl implements UserService {
 
         User user = new User();
         BeanUtil.copyProperties(request, user);
+        // 角色由服务端授予；公开注册入口不能接受客户端提升为管理员。
+        user.setUserType(1);
         user.setPassword(passwordEncoder.encode(request.getPassword()));
         user.setStatus(1);
         userMapper.insert(user);

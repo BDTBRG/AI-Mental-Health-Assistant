@@ -19,6 +19,7 @@ export interface StartSession {
 	startTime: number
 	status: string
 	userHash: number
+	reviewConsent?: boolean
 }
 
 // 分页查询历史咨询会话数据
@@ -32,6 +33,17 @@ export interface HistorySession {
 	messageCount: number
 	lastMessageContent: string
 	lastMessageTime: string
+	reviewConsent?: boolean
+	reviewStatus?: 'NONE' | 'PENDING' | 'IN_PROGRESS' | 'RESOLVED' | 'CANCELLED'
+}
+
+export interface AgentMemoryItem {
+	id: number
+	content: string
+	sourceType: string
+	expiresAt: string | null
+	createdAt: string
+	updatedAt: string
 }
 
 // 会话消息数据(单条)
@@ -52,10 +64,12 @@ export interface Message {
 // 会话情绪分析响应数据
 export interface EmotionAnalysis {
 	primaryEmotion: string
-	emotionScore: number
-	riskLevel: number
+	emotionScore: number | null
+	riskLevel: number | null
+	riskStatus?: 'known' | 'unknown'
+	analysisStatus?: 'idle' | 'complete' | 'unavailable'
 	riskDescription: string
-	isNegative: boolean
+	isNegative: boolean | null
 	suggestion: string
 	improvementSuggestions: string[]
 }

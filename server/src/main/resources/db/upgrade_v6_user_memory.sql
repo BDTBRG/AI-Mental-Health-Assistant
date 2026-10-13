@@ -1,0 +1,18 @@
+CREATE TABLE IF NOT EXISTS `agent_memory_settings` (
+    `user_id` BIGINT NOT NULL,
+    `personalization_enabled` TINYINT NOT NULL DEFAULT 0,
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`user_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `agent_memory` (
+    `id` BIGINT NOT NULL AUTO_INCREMENT,
+    `user_id` BIGINT NOT NULL,
+    `content` VARCHAR(1000) NOT NULL,
+    `source_type` VARCHAR(30) NOT NULL DEFAULT 'USER_ENTERED',
+    `expires_at` DATE DEFAULT NULL,
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `idx_agent_memory_user_expiry` (`user_id`, `expires_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

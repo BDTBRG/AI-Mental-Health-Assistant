@@ -8,6 +8,24 @@
 		</div>
 
 		<div class="content">
+			<div class="diary-card trend-card">
+				<div class="title">自评情绪趋势</div>
+				<p class="trend-caption">图表只展示你当天填写的 1–10 分自评。缺少记录的日期会断开，不代表情绪正常；AI文字分析单独保留在日记中，不会转换成分数。</p>
+				<div v-if="trendPoints.length" class="trend-chart-wrap">
+					<div class="trend-axis-labels"><span>10</span><span>5</span><span>1</span></div>
+					<svg class="trend-chart" viewBox="0 0 600 220" role="img" aria-label="最近情绪日记自评趋势">
+						<line v-for="score in [1, 5, 10]" :key="score" x1="36" x2="564" :y1="trendY(score)" :y2="trendY(score)" class="trend-grid-line" />
+						<polyline v-for="(segment, index) in trendSegments" :key="index" :points="segment.map(point => `${point.x},${point.y}`).join(' ')" class="trend-line" />
+						<circle v-for="point in trendPoints" :key="point.id" :cx="point.x" :cy="point.y" r="5" class="trend-point">
+							<title>{{ point.date }}：自评 {{ point.score }}/10，{{ point.emotion }}</title>
+						</circle>
+					</svg>
+					<div class="trend-range"><span>{{ trendPoints[0]?.date }}</span><span>{{ trendPoints[trendPoints.length - 1]?.date }}</span></div>
+				</div>
+				<el-empty v-else description="还没有自评记录；空白表示未记录，不代表情绪正常" :image-size="72" />
+				<div class="trend-legend"><span class="legend-dot"></span>用户自评</div>
+			</div>
+
 			<!-- 提交成功后的AI分析卡片 -->
 			<div class="diary-card ai-analysis-card" v-if="showAiResult">
 				<div class="title">🤖 AI情感分析</div>
@@ -125,6 +143,7 @@
 							<div class="analysis-status" v-else-if="diary.aiAnalysisStatus === 'PENDING'">
 								<el-tag type="warning" size="small">分析中</el-tag>
 							</div>
+							<el-button text type="danger" size="small" @click="deleteDiaryEntry(diary.id)">删除</el-button>
 						</div>
 						<div class="history-content">
 							<div class="content-preview">{{ diary.diaryContentPreview || diary.diaryContent }}</div>
@@ -145,10 +164,10 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref, onMounted } from 'vue'
+import { computed, reactive, ref, onMounted } from 'vue'
 import type { EmotionDiaryQuery, EmotionDiaryVO } from '@/types/user'
-import { dayjs, ElMessage } from 'element-plus'
-import { submitEmotionDiary, getMyDiaries } from '@/api/user'
+import { dayjs, ElMessage, ElMessageBox } from 'element-plus'
+import { submitEmotionDiary, getMyDiaries, deleteMyEmotionDiary } from '@/api/user'
 import MarkdownRenderer from '@/components/MarkdownRenderer.vue'
 
 const iconUrl = new URL('@/assets/like.png', import.meta.url).href
@@ -185,6 +204,47 @@ const aiResultLoading = ref(false)
 const aiAnalysisText = ref('')
 
 const diaryHistory = ref<EmotionDiaryVO[]>([])
+
+const trendY = (score: number) => 190 - ((score - 1) / 9) * 160
+const trendPoints = computed(() => {
+	const entries = diaryHistory.value
+		.filter(entry => Number.isFinite(entry.moodScore) && entry.moodScore >= 1 && entry.moodScore <= 10)
+		.sort((left, right) => left.diaryDate.localeCompare(right.diaryDate))
+	if (!entries.length) return []
+	const firstDay = new Date(`${entries[0].diaryDate}T00:00:00`).getTime()
+	const lastDay = new Date(`${entries[entries.length - 1].diaryDate}T00:00:00`).getTime()
+	const spanDays = Math.max(0, Math.round((lastDay - firstDay) / 86400000))
+	return entries.map(entry => {
+		const day = new Date(`${entry.diaryDate}T00:00:00`).getTime()
+		const offset = Math.round((day - firstDay) / 86400000)
+		return {
+			id: entry.id,
+			date: entry.diaryDate,
+			score: entry.moodScore,
+			emotion: entry.dominantEmotion,
+			x: spanDays === 0 ? 300 : 36 + (offset / spanDays) * 528,
+			y: trendY(entry.moodScore),
+		}
+	})
+})
+const trendSegments = computed(() => {
+	const segments: (typeof trendPoints.value)[] = []
+	let current: typeof trendPoints.value = []
+	for (let index = 0; index < trendPoints.value.length; index++) {
+		const point = trendPoints.value[index]
+		if (index > 0) {
+			const previous = trendPoints.value[index - 1]
+			const gap = Math.round((new Date(`${point.date}T00:00:00`).getTime() - new Date(`${previous.date}T00:00:00`).getTime()) / 86400000)
+			if (gap !== 1) {
+				if (current.length > 1) segments.push(current)
+				current = []
+			}
+		}
+		current.push(point)
+	}
+	if (current.length > 1) segments.push(current)
+	return segments
+})
 
 const selectEmotion = (emotionName: string) => {
 	diaryForm.dominantEmotion = emotionName
@@ -262,6 +322,17 @@ const loadDiaryHistory = async () => {
 		diaryHistory.value = diaries
 	} catch {
 		// 静默失败
+	}
+}
+
+const deleteDiaryEntry = async (id: number) => {
+	try {
+		await ElMessageBox.confirm('删除后，这篇日记和未完成的分析任务会一并移除。', '删除日记', { type: 'warning' })
+		await deleteMyEmotionDiary(id)
+		diaryHistory.value = diaryHistory.value.filter(diary => diary.id !== id)
+		ElMessage.success('日记已删除')
+	} catch {
+		// 用户取消或请求失败时保留当前列表状态。
 	}
 }
 
@@ -439,5 +510,21 @@ onMounted(() => {
 			}
 		}
 	}
+
+	.trend-caption {
+		margin: -8px 0 12px;
+		color: #6b7280;
+		font-size: 13px;
+		line-height: 1.6;
+	}
+	.trend-chart-wrap { position: relative; padding-left: 24px; }
+	.trend-chart { display: block; width: 100%; height: 220px; overflow: visible; }
+	.trend-axis-labels { position: absolute; left: 0; top: 20px; bottom: 24px; display: flex; flex-direction: column; justify-content: space-between; color: #9ca3af; font-size: 11px; }
+	.trend-grid-line { stroke: #e5e7eb; stroke-dasharray: 4 5; stroke-width: 1; }
+	.trend-line { fill: none; stroke: #f59e0b; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+	.trend-point { fill: #fff; stroke: #d97706; stroke-width: 3; }
+	.trend-range { display: flex; justify-content: space-between; margin: -4px 0 8px 24px; color: #9ca3af; font-size: 11px; }
+	.trend-legend { display: flex; align-items: center; gap: 8px; color: #6b7280; font-size: 12px; }
+	.legend-dot { width: 9px; height: 9px; border-radius: 50%; background: #d97706; }
 }
 </style>

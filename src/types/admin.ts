@@ -96,6 +96,7 @@ export interface ConsultationSearchParams {
 	size?: string
 	total?: string
 	emotionTag?: string
+	reviewStatus?: string
 }
 
 // 咨询会话数据
@@ -109,6 +110,10 @@ export interface ConsultationSessionItem {
 	messageCount: number
 	lastMessageContent: string
 	lastMessageTime: string
+	reviewConsent?: boolean
+	reviewStatus?: 'NONE' | 'PENDING' | 'IN_PROGRESS' | 'RESOLVED' | 'CANCELLED'
+	reviewAssigneeId?: number | null
+	reviewVersion?: number
 }
 
 // 咨询会话详情数据

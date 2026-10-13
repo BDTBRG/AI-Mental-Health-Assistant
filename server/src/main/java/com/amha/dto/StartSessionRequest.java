@@ -6,4 +6,5 @@ import lombok.Data;
 public class StartSessionRequest {
     private String initialMessage;
     private String sessionTitle;
+    private Boolean reviewConsent;
 }

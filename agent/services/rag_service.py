@@ -12,6 +12,9 @@ RAG 服务 —— 管理 FAISS 向量索引的完整生命周期。
 import os
 import json
 import logging
+import math
+import re
+import hashlib
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 
@@ -47,6 +50,8 @@ class RAGService:
 
     # 检索参数
     DEFAULT_TOP_K = 3
+    MIN_SEMANTIC_SCORE = 0.32
+    LEXICAL_CANDIDATE_FACTOR = 4
 
     def __init__(self, model_name: str = "paraphrase-multilingual-MiniLM-L12-v2"):
         self.model_name = model_name
@@ -54,6 +59,7 @@ class RAGService:
         self.index: Optional[faiss.Index] = None
         self.chunks: List[TextChunk] = []
         self._next_chunk_id = 0
+        self.index_version = "unbuilt"
 
         os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -64,6 +70,17 @@ class RAGService:
             logger.info(f"加载 Sentence-Transformers 模型: {self.model_name}")
             self.model = SentenceTransformer(self.model_name)
             logger.info("模型加载完成")
+
+    def _compute_index_version(self) -> str:
+        digest = hashlib.sha256()
+        for chunk in self.chunks:
+            digest.update(str(chunk.article_id).encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(chunk.article_title.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(chunk.content.encode("utf-8"))
+            digest.update(b"\0")
+        return digest.hexdigest()[:16]
 
     # ========== 文本分块 ==========
 
@@ -127,6 +144,10 @@ class RAGService:
             logger.warning("没有可索引的内容，创建空索引")
             self.chunks = []
             self.index = None
+            self.index_version = self._compute_index_version()
+            if os.path.exists(INDEX_PATH):
+                os.remove(INDEX_PATH)
+            self._save()
             return 0
 
         # 2. 向量化
@@ -143,6 +164,7 @@ class RAGService:
         chunk_ids = np.array([c.chunk_id for c in all_chunks], dtype='int64')
         self.index.add_with_ids(embeddings, chunk_ids)
         self.chunks = all_chunks
+        self.index_version = self._compute_index_version()
 
         # 4. 持久化到磁盘
         self._save()
@@ -155,7 +177,7 @@ class RAGService:
     def add_article(self, article_id: int, title: str, content: str):
         """新增单篇文章到索引"""
         if self.index is None:
-            logger.warning("索引未初始化，无法增量添加")
+            self.rebuild_index([{"id": article_id, "title": title, "content": content}])
             return
 
         self._ensure_model()
@@ -170,6 +192,7 @@ class RAGService:
 
         self.index.add_with_ids(embeddings, chunk_ids)
         self.chunks.extend(chunks)
+        self.index_version = self._compute_index_version()
         self._save()
         logger.info(f"文章 {article_id} 添加完成：+{len(chunks)} 块，索引总量 {self.index.ntotal}")
 
@@ -190,6 +213,7 @@ class RAGService:
 
         # 更新内存中的 chunks 列表
         self.chunks = [c for c in self.chunks if c.article_id != article_id]
+        self.index_version = self._compute_index_version()
         self._save()
         logger.info(f"文章 {article_id} 删除完成：-{len(ids_to_remove)} 块，索引总量 {self.index.ntotal}")
 
@@ -200,9 +224,58 @@ class RAGService:
 
     # ========== 语义检索 ==========
 
+    @staticmethod
+    def _tokenize(text: str) -> List[str]:
+        """Tokenize English words and Chinese character bigrams without a runtime tokenizer dependency."""
+        tokens: List[str] = []
+        for segment in re.findall(r"[a-zA-Z0-9]+|[\u4e00-\u9fff]+", text.lower()):
+            if re.fullmatch(r"[a-zA-Z0-9]+", segment):
+                tokens.append(segment)
+            elif len(segment) == 1:
+                tokens.append(segment)
+            else:
+                tokens.extend(segment[index:index + 2] for index in range(len(segment) - 1))
+        return tokens
+
+    def _lexical_scores(self, query: str) -> Dict[int, float]:
+        """Return an IDF-weighted query-term coverage score for each chunk."""
+        query_terms = set(self._tokenize(query))
+        if not query_terms or not self.chunks:
+            return {}
+
+        document_terms = {
+            chunk.chunk_id: self._tokenize(chunk.article_title + " " + chunk.content)
+            for chunk in self.chunks
+        }
+        document_frequency: Dict[str, int] = {}
+        for terms in document_terms.values():
+            for term in set(terms):
+                document_frequency[term] = document_frequency.get(term, 0) + 1
+
+        document_count = len(document_terms)
+        term_weights = {
+            term: math.log(1 + (document_count - document_frequency.get(term, 0) + 0.5)
+                           / (document_frequency.get(term, 0) + 0.5))
+            for term in query_terms
+        }
+        total_weight = sum(term_weights.values()) or 1.0
+        scores: Dict[int, float] = {}
+        for chunk_id, terms in document_terms.items():
+            frequencies = {}
+            for term in terms:
+                frequencies[term] = frequencies.get(term, 0) + 1
+            matched_weight = 0.0
+            for term, weight in term_weights.items():
+                frequency = frequencies.get(term, 0)
+                if frequency:
+                    # Saturating TF prevents repeated boilerplate from dominating ranking.
+                    matched_weight += weight * (frequency * 2.2) / (frequency + 1.2)
+            scores[chunk_id] = min(1.0, matched_weight / total_weight)
+        return scores
+
     def search(self, query: str, top_k: int = DEFAULT_TOP_K) -> List[Dict]:
         """
-        语义检索。
+        混合检索与轻量重排：FAISS 召回候选，再融合稠密相似度和 IDF 词项覆盖率。
         返回 Top-K 相关片段，每个元素格式：
         {"title": "文章标题", "snippet": "片段文本", "score": 0.85}
         """
@@ -216,21 +289,45 @@ class RAGService:
         query_vec = self.model.encode([query], normalize_embeddings=True)
         query_vec = np.array(query_vec).astype('float32')
 
-        # FAISS 搜索
-        distances, indices = self.index.search(query_vec, min(top_k, self.index.ntotal))
-
-        results = []
+        # Dense recall intentionally overfetches so lexical reranking can change the order.
+        candidate_limit = min(max(top_k, top_k * self.LEXICAL_CANDIDATE_FACTOR), self.index.ntotal)
+        distances, indices = self.index.search(query_vec, candidate_limit)
+        chunks_by_id = {chunk.chunk_id: chunk for chunk in self.chunks}
+        semantic_scores: Dict[int, float] = {}
         for dist, idx in zip(distances[0], indices[0]):
-            if idx < 0 or idx >= len(self.chunks):
+            if idx < 0:
                 continue
-            chunk = self.chunks[idx]
+            if int(idx) not in chunks_by_id:
+                logger.warning("FAISS returned chunk ID %s without metadata", idx)
+                continue
+            semantic_scores[int(idx)] = max(0.0, min(1.0, float(dist)))
+
+        lexical_scores = self._lexical_scores(query)
+        lexical_candidates = sorted(lexical_scores, key=lexical_scores.get, reverse=True)[:candidate_limit]
+        candidate_ids = set(semantic_scores) | set(lexical_candidates)
+        results = []
+        for chunk_id in candidate_ids:
+            chunk = chunks_by_id.get(chunk_id)
+            if chunk is None:
+                continue
+            semantic_score = semantic_scores.get(chunk_id, 0.0)
+            lexical_score = lexical_scores.get(chunk_id, 0.0)
+            # Refuse weak matches; an exact lexical hit can still rescue a domain term
+            # that the embedding model ranks poorly.
+            if semantic_score < self.MIN_SEMANTIC_SCORE and lexical_score < 0.25:
+                continue
+            confidence = 0.65 * semantic_score + 0.35 * lexical_score
             results.append({
+                "chunkId": chunk.chunk_id,
+                "articleId": chunk.article_id,
                 "title": chunk.article_title,
                 "snippet": chunk.content,
-                "score": round(float(dist), 4),
+                "score": round(confidence, 4),
+                "semanticScore": round(semantic_score, 4),
+                "lexicalScore": round(lexical_score, 4),
             })
 
-        return results
+        return sorted(results, key=lambda item: item["score"], reverse=True)[:top_k]
 
     # ========== 持久化 ==========
 
@@ -250,7 +347,11 @@ class RAGService:
             "char_end": c.char_end,
         } for c in self.chunks]
         with open(META_PATH, "w", encoding="utf-8") as f:
-            json.dump({"next_chunk_id": self._next_chunk_id, "chunks": meta}, f, ensure_ascii=False, indent=2)
+            json.dump({
+                "next_chunk_id": self._next_chunk_id,
+                "index_version": self.index_version,
+                "chunks": meta,
+            }, f, ensure_ascii=False, indent=2)
         logger.info(f"元数据已保存: {META_PATH} ({len(meta)} 条)")
 
     def load(self) -> bool:
@@ -281,6 +382,9 @@ class RAGService:
                 )
                 for m in data["chunks"]
             ]
+            self.index_version = data.get("index_version") or self._compute_index_version()
+            if self.index.ntotal != len(self.chunks):
+                raise ValueError("FAISS 向量数与分块元数据数量不一致")
             logger.info(f"元数据已加载: {META_PATH} ({len(self.chunks)} 条)")
             return True
         except Exception as e:
@@ -311,6 +415,7 @@ class RAGService:
             "total_chunks": len(self.chunks),
             "total_articles": self.total_articles,
             "model": self.model_name,
+            "index_version": self.index_version,
             "index_path": INDEX_PATH,
         }
 

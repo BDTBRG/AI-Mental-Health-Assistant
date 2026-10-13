@@ -1,8 +1,16 @@
 ﻿<template>
 	<div>
-		<PageHead title="咨询记录" />
+		<PageHead title="人工复核工作台" />
+		<div class="queue-toolbar">
+			<el-select v-model="pagination.reviewStatus" placeholder="选择复核状态" @change="handleStatusChange">
+				<el-option label="待处理" value="PENDING" />
+				<el-option label="处理中" value="IN_PROGRESS" />
+				<el-option label="已完成" value="RESOLVED" />
+			</el-select>
+			<span>队列仅展示用户已申请且仍授权复核的会话。</span>
+		</div>
 		<el-table :data="tableData" style="width: 100%">
-			<el-table-column label="会话ID" width="100">
+			<el-table-column label="用户" width="100">
 				<template #default="scope">
 					{{ scope.row.userNickname }}
 				</template>
@@ -11,6 +19,8 @@
 				<template #default="scope">
 					<div class="session-title">
 						{{ scope.row.sessionTitle }}
+						<el-tag v-if="scope.row.reviewConsent" size="small" type="success">用户已授权</el-tag>
+						<el-tag size="small" :type="reviewTagType(scope.row.reviewStatus)">{{ reviewStatusLabel(scope.row.reviewStatus) }}</el-tag>
 					</div>
 					<div class="session-preview">
 						{{ scope.row.lastMessageContent }}
@@ -19,14 +29,12 @@
 			</el-table-column>
 			<el-table-column prop="messageCount" label="消息数" width="100" />
 			<el-table-column prop="lastMessageTime" label="时间" width="100" />
-			<el-table-column label="操作" width="100">
+			<el-table-column label="操作" width="250">
 				<template #default="scope">
-					<el-button
-						text
-						type="primary"
-						@click="viewSessionDetail(scope.row)"
-						>详情</el-button
-					>
+					<el-button text type="primary" @click="viewSessionDetail(scope.row)">详情</el-button>
+					<el-button v-if="scope.row.reviewStatus === 'PENDING'" text type="warning" @click="changeReviewState(scope.row, 'IN_PROGRESS')">领取</el-button>
+					<el-button v-if="scope.row.reviewStatus === 'IN_PROGRESS' && scope.row.reviewAssigneeId === currentUserId" text type="success" @click="changeReviewState(scope.row, 'RESOLVED')">完成</el-button>
+					<el-button v-if="scope.row.reviewStatus === 'IN_PROGRESS' && scope.row.reviewAssigneeId === currentUserId" text @click="changeReviewState(scope.row, 'PENDING')">释放</el-button>
 				</template>
 			</el-table-column>
 		</el-table>
@@ -103,9 +111,11 @@
 <script setup lang="ts">
 import PageHead from '@/components/PageHead.vue'
 import { ref, reactive, onMounted } from 'vue'
+import { ElMessage } from 'element-plus'
 import {
 	getConsultationSessionPage,
 	getConsultationSessionDetail,
+	updateConsultationReviewState,
 } from '@/api/admin'
 import type {
 	ConsultationSessionItem,
@@ -114,11 +124,13 @@ import type {
 } from '@/types/admin'
 
 const tableData = ref<ConsultationSessionItem[]>([])
+const currentUserId = Number(JSON.parse(localStorage.getItem('userInfo') || '{}').id)
 
 const pagination = reactive<ConsultationSearchParams>({
 	currentPage: '1',
 	size: '10',
 	total: '0',
+	reviewStatus: 'PENDING',
 })
 
 onMounted(async () => {
@@ -153,6 +165,38 @@ const handleChange = (page: number) => {
 	handleSearch()
 }
 
+const handleStatusChange = () => {
+	pagination.currentPage = '1'
+	handleSearch()
+}
+
+const reviewStatusLabel = (status?: string) => ({
+	NONE: '未申请', PENDING: '待处理', IN_PROGRESS: '处理中', RESOLVED: '已完成', CANCELLED: '已撤回',
+}[status ?? 'NONE'] ?? '状态未知')
+
+const reviewTagType = (status?: string) => ({
+	PENDING: 'warning', IN_PROGRESS: 'primary', RESOLVED: 'success', CANCELLED: 'info',
+}[status ?? 'NONE'] ?? 'info')
+
+const changeReviewState = async (
+	session: ConsultationSessionItem,
+	targetStatus: 'IN_PROGRESS' | 'RESOLVED' | 'PENDING',
+) => {
+	try {
+		await updateConsultationReviewState(
+			session.id,
+			targetStatus,
+			session.reviewVersion ?? 0,
+		)
+		pagination.reviewStatus = targetStatus
+		ElMessage.success(targetStatus === 'IN_PROGRESS' ? '已领取复核事项' : targetStatus === 'RESOLVED' ? '复核已完成' : '已释放复核事项')
+		await handleSearch()
+	} catch {
+		ElMessage.error('状态已变化或操作失败，请刷新队列后重试')
+		await handleSearch()
+	}
+}
+
 const showDetailDialog = ref<boolean>(false)
 </script>
 
@@ -161,6 +205,15 @@ const showDetailDialog = ref<boolean>(false)
 	font-weight: 500;
 	color: #333;
 	margin-bottom: 4px;
+}
+
+.queue-toolbar {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	margin: 0 0 16px;
+	color: #6b7280;
+	font-size: 13px;
 }
 
 .session-preview {

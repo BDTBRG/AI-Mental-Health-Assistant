@@ -18,6 +18,13 @@ public class ConsultationSession {
     private Integer messageCount;
     private String lastMessageContent;
     private LocalDateTime lastMessageTime;
+    private Boolean reviewConsent;
+    private LocalDateTime reviewConsentUpdatedAt;
+    private String reviewStatus;
+    private Long reviewAssigneeId;
+    private Integer reviewVersion;
+    private LocalDateTime reviewRequestedAt;
+    private LocalDateTime reviewUpdatedAt;
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createdAt;
     @TableField(fill = FieldFill.INSERT_UPDATE)

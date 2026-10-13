@@ -5,12 +5,16 @@ DeepSeek 兼容 OpenAI function calling 协议，直接用 ChatOpenAI 的 bind_t
 """
 
 import logging
+from collections import Counter
+from contextvars import ContextVar
+from datetime import date, timedelta
 from langchain_core.tools import tool
 from typing import Optional
 
 from services.rag_service import rag_service
 
 logger = logging.getLogger(__name__)
+CURRENT_AGENT_CONTEXT: ContextVar[Optional[dict]] = ContextVar("agent_context", default=None)
 
 # ──────────────────────────────────────────────────────────────
 # 工具 1：知识库语义检索  (已升级为真实 FAISS 检索)
@@ -19,13 +23,14 @@ logger = logging.getLogger(__name__)
 def search_knowledge_base(query: str) -> str:
     """搜索心理健康知识库，获取与用户问题相关的心理学科普内容。
     适用于：用户询问心理学概念、症状、治疗方法、应对技巧等。
-    参数 query: 用户的自然语言查询，如"如何缓解焦虑""""
+    参数 query: 用户的自然语言查询，如「如何缓解焦虑」"""
     # 真实 FAISS 语义检索：Sentence-Transformers 向量化 → FAISS Top-3
     results = rag_service.search(query, top_k=3)
     if not results:
         return "未在知识库中找到与「{}」直接相关的内容，请用更具体的心理学术语重试。".format(query)
     return "\n\n---\n".join(
-        "[来源: {}] {}\n(相似度: {})".format(
+        "[引用: article_id={}, chunk_id={}, 标题: {}] {}\n(相关度: {})".format(
+            r.get("articleId", "?"), r.get("chunkId", "?"),
             r["title"], r["snippet"], r["score"]
         ) for r in results
     )
@@ -39,15 +44,78 @@ def get_emotion_history(days: int = 7) -> str:
     """查询用户近期的心情日记记录与情绪变化趋势。
     适用于：用户说"我最近情绪不太好"或 LLM 想了解用户的长期情绪模式。
     参数 days: 查询最近多少天的记录，默认 7 天"""
-    # 实际实现：从数据库查询该用户的 emotion_diary 表，聚合统计
-    return (
-        "近{}天情绪记录：\n".format(days) +
-        "- 主导情绪：焦虑 4 天，平静 2 天，悲伤 1 天\n"
-        "- 平均心情评分：4.2 / 10（较上月下降 1.3）\n"
-        "- 高频触发因素：学业压力、社交回避\n"
-        "- 睡眠质量均值：3.1 / 5\n"
-        "- 共记录日记 5 篇"
+    context = CURRENT_AGENT_CONTEXT.get() or {}
+    history = context.get("emotionHistory") or []
+    window_days = max(1, min(int(days), 90))
+    try:
+        reference_date = date.fromisoformat(str(context.get("asOfDate", ""))[:10])
+    except ValueError:
+        reference_date = date.today()
+    cutoff = reference_date - timedelta(days=window_days - 1)
+    records = []
+    for item in history:
+        try:
+            entry_date = date.fromisoformat(str(item.get("diaryDate", ""))[:10])
+        except ValueError:
+            continue
+        if entry_date >= cutoff:
+            records.append(item)
+
+    if not records:
+        return "近{}天没有可用的用户自评日记记录，无法判断情绪变化趋势。".format(window_days)
+
+    emotion_counts = Counter(
+        str(item.get("dominantEmotion"))
+        for item in records if item.get("dominantEmotion")
     )
+    mood_scores = [item.get("moodScore") for item in records
+                   if isinstance(item.get("moodScore"), (int, float))]
+    sleep_scores = [item.get("sleepQuality") for item in records
+                    if isinstance(item.get("sleepQuality"), (int, float))]
+    lines = ["近{}天用户自评记录（{}篇）：".format(window_days, len(records))]
+    if emotion_counts:
+        lines.append("- 记录中的主要情绪：" + "、".join(
+            "{} {}篇".format(name, count) for name, count in emotion_counts.most_common()
+        ))
+    if mood_scores:
+        lines.append("- 平均自评心情：{:.1f} / 10".format(sum(mood_scores) / len(mood_scores)))
+    if sleep_scores:
+        lines.append("- 平均自评睡眠：{:.1f} / 5".format(sum(sleep_scores) / len(sleep_scores)))
+    recent = sorted(records, key=lambda item: str(item.get("diaryDate", "")), reverse=True)[:5]
+    lines.append("- 最近记录：" + "；".join(
+        "{} {}（自评{}）".format(
+            item.get("diaryDate", "日期未知"),
+            item.get("dominantEmotion", "未填写情绪"),
+            item.get("moodScore", "未评分"),
+        ) for item in recent
+    ))
+    lines.append("这些数据仅为用户自评，不构成诊断或风险结论。")
+    return "\n".join(lines)
+
+
+@tool
+def get_user_memories() -> str:
+    """读取用户主动保存且仍在有效期内的个人偏好或背景信息。
+    仅在这些信息与当前问题相关时使用；不要把记忆当成诊断或确定事实。"""
+    context = CURRENT_AGENT_CONTEXT.get() or {}
+    if not context.get("personalizationEnabled"):
+        return "用户未开启个性化记忆，当前没有可使用的已授权记忆。"
+    memories = context.get("approvedMemories") or []
+    try:
+        reference_date = date.fromisoformat(str(context.get("asOfDate", ""))[:10])
+    except ValueError:
+        reference_date = date.today()
+    memories = [memory for memory in memories if not memory.get("expiresAt")
+                or str(memory.get("expiresAt"))[:10] >= reference_date.isoformat()]
+    if not memories:
+        return "用户已开启个性化记忆，但没有尚在有效期内的已保存信息。"
+    lines = ["以下信息由用户主动保存，只能作为个人化背景参考："]
+    for memory in memories[:20]:
+        lines.append("- {}（来源：{}；最后更新：{}；有效期至：{}）".format(
+            memory.get("content", ""), memory.get("source", "用户主动添加"),
+            memory.get("updatedAt", "未知"), memory.get("expiresAt") or "长期有效"
+        ))
+    return "\n".join(lines)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -142,6 +210,7 @@ def get_crisis_resources() -> str:
 ALL_TOOLS = [
     search_knowledge_base,
     get_emotion_history,
+    get_user_memories,
     suggest_exercise,
     get_crisis_resources,
 ]

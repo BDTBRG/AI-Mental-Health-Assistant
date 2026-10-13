@@ -15,6 +15,7 @@ import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.Arrays;
@@ -27,6 +28,7 @@ public class KnowledgeServiceImpl implements KnowledgeService {
 
     private final KnowledgeCategoryMapper categoryMapper;
     private final KnowledgeArticleMapper articleMapper;
+    private final KnowledgeIndexOutboxService indexOutboxService;
 
     @Override
     public List<CategoryVO> getCategoryTree() {
@@ -56,6 +58,11 @@ public class KnowledgeServiceImpl implements KnowledgeService {
 
     @Override
     public PageResult<ArticleVO> getArticlePage(ArticlePageQuery query) {
+        return getArticlePage(query, null);
+    }
+
+    @Override
+    public PageResult<ArticleVO> getArticlePage(ArticlePageQuery query, Integer userType) {
         LambdaQueryWrapper<KnowledgeArticle> wrapper = new LambdaQueryWrapper<>();
         if (StrUtil.isNotBlank(query.getTitle())) {
             wrapper.like(KnowledgeArticle::getTitle, query.getTitle());
@@ -63,7 +70,9 @@ public class KnowledgeServiceImpl implements KnowledgeService {
         if (StrUtil.isNotBlank(query.getCategoryId())) {
             wrapper.eq(KnowledgeArticle::getCategoryId, Long.parseLong(query.getCategoryId()));
         }
-        if (StrUtil.isNotBlank(query.getStatus())) {
+        if (!Integer.valueOf(2).equals(userType)) {
+            wrapper.eq(KnowledgeArticle::getStatus, 1);
+        } else if (StrUtil.isNotBlank(query.getStatus())) {
             wrapper.eq(KnowledgeArticle::getStatus, Integer.parseInt(query.getStatus()));
         }
         if (StrUtil.isNotBlank(query.getAuthorName())) {
@@ -100,6 +109,7 @@ public class KnowledgeServiceImpl implements KnowledgeService {
     }
 
     @Override
+    @Transactional
     public void createArticle(ArticleSaveRequest request, Long userId, String username) {
         KnowledgeArticle article = new KnowledgeArticle();
         article.setCategoryId(request.getCategoryId());
@@ -116,9 +126,18 @@ public class KnowledgeServiceImpl implements KnowledgeService {
 
     @Override
     public ArticleDetailVO getArticleById(Long id) {
+        return getArticleById(id, null);
+    }
+
+    @Override
+    public ArticleDetailVO getArticleById(Long id, Integer userType) {
         KnowledgeArticle article = articleMapper.selectById(id);
         if (article == null) {
             throw new BusinessException("文章不存在");
+        }
+        if (!Integer.valueOf(1).equals(article.getStatus())
+                && !Integer.valueOf(2).equals(userType)) {
+            throw new BusinessException("404", "文章不存在");
         }
         KnowledgeCategory category = categoryMapper.selectById(article.getCategoryId());
 
@@ -149,6 +168,7 @@ public class KnowledgeServiceImpl implements KnowledgeService {
     }
 
     @Override
+    @Transactional
     public void updateArticle(Long id, ArticleSaveRequest request) {
         KnowledgeArticle article = articleMapper.selectById(id);
         if (article == null) {
@@ -164,9 +184,13 @@ public class KnowledgeServiceImpl implements KnowledgeService {
             article.setCategoryId(request.getCategoryId());
         }
         articleMapper.updateById(article);
+        if (Integer.valueOf(1).equals(article.getStatus())) {
+            indexOutboxService.enqueueArticle(id);
+        }
     }
 
     @Override
+    @Transactional
     public void changeArticleStatus(Long id, Integer status) {
         KnowledgeArticle article = articleMapper.selectById(id);
         if (article == null) {
@@ -177,15 +201,18 @@ public class KnowledgeServiceImpl implements KnowledgeService {
             article.setPublishedAt(LocalDateTime.now());
         }
         articleMapper.updateById(article);
+        indexOutboxService.enqueueArticle(id);
     }
 
     @Override
+    @Transactional
     public void deleteArticle(Long id) {
         KnowledgeArticle article = articleMapper.selectById(id);
         if (article == null) {
             throw new BusinessException("文章不存在");
         }
         articleMapper.deleteById(id);
+        indexOutboxService.enqueueArticle(id);
     }
 
     private String getStatusText(Integer status) {

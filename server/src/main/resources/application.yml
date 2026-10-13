@@ -45,3 +45,9 @@ file:
 # Python AI Agent config
 agent:
   base-url: http://localhost:5000
+  internal-token: ${AGENT_INTERNAL_TOKEN:}
+
+app:
+  outbox:
+    enabled: ${OUTBOX_ENABLED:true}
+    poll-interval-ms: ${OUTBOX_POLL_INTERVAL_MS:2000}

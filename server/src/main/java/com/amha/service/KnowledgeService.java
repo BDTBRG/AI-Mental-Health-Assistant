@@ -12,8 +12,10 @@ import java.util.List;
 public interface KnowledgeService {
     List<CategoryVO> getCategoryTree();
     PageResult<ArticleVO> getArticlePage(ArticlePageQuery query);
+    PageResult<ArticleVO> getArticlePage(ArticlePageQuery query, Integer userType);
     void createArticle(ArticleSaveRequest request, Long userId, String username);
     ArticleDetailVO getArticleById(Long id);
+    ArticleDetailVO getArticleById(Long id, Integer userType);
     void updateArticle(Long id, ArticleSaveRequest request);
     void changeArticleStatus(Long id, Integer status);
     void deleteArticle(Long id);

@@ -2,6 +2,7 @@ package com.amha.config;
 
 import com.amha.entity.*;
 import com.amha.mapper.*;
+import com.amha.service.impl.KnowledgeIndexOutboxService;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -23,6 +24,7 @@ public class DataInitializer implements CommandLineRunner {
     private final ConsultationSessionMapper consultationSessionMapper;
     private final ConsultationMessageMapper consultationMessageMapper;
     private final EmotionDiaryMapper emotionDiaryMapper;
+    private final KnowledgeIndexOutboxService knowledgeIndexOutboxService;
 
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
 
@@ -131,6 +133,9 @@ public class DataInitializer implements CommandLineRunner {
         article.setPublishedAt(LocalDateTime.parse(publishedAt.replace(" ", "T")));
         article.setReadCount(readCount);
         knowledgeArticleMapper.insert(article);
+        if (Integer.valueOf(1).equals(article.getStatus())) {
+            knowledgeIndexOutboxService.enqueueArticle(article.getId());
+        }
     }
 
     private void initDiaries() {

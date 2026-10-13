@@ -20,4 +20,8 @@ public class SessionVO {
     private Integer messageCount;
     private String lastMessageContent;
     private LocalDateTime lastMessageTime;
+    private Boolean reviewConsent;
+    private String reviewStatus;
+    private Long reviewAssigneeId;
+    private Integer reviewVersion;
 }

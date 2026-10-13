@@ -70,7 +70,22 @@ export function getConsultationSessionPage(
 	params: ConsultationSearchParams,
 ): Promise<ListData<ConsultationSessionItem>> {
 	return request.get('/psychological-chat/sessions', {
-		params: { pageNum: params.currentPage || 1, pageSize: params.size || 10 },
+		params: {
+			pageNum: params.currentPage || 1,
+			pageSize: params.size || 10,
+			reviewStatus: params.reviewStatus || undefined,
+		},
+	})
+}
+
+export function updateConsultationReviewState(
+	sessionId: number,
+	targetStatus: 'IN_PROGRESS' | 'RESOLVED' | 'PENDING',
+	expectedVersion: number,
+): Promise<void> {
+	return request.put(`/psychological-chat/admin/sessions/${sessionId}/review-state`, {
+		targetStatus,
+		expectedVersion,
 	})
 }
 

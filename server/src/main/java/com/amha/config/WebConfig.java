@@ -1,6 +1,7 @@
 package com.amha.config;
 
 import com.amha.interceptor.JwtInterceptor;
+import com.amha.interceptor.AdminAuthorizationInterceptor;
 import lombok.RequiredArgsConstructor;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
@@ -13,6 +14,7 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 public class WebConfig implements WebMvcConfigurer {
 
     private final JwtInterceptor jwtInterceptor;
+    private final AdminAuthorizationInterceptor adminAuthorizationInterceptor;
 
     @Override
     public void addCorsMappings(CorsRegistry registry) {
@@ -30,12 +32,11 @@ public class WebConfig implements WebMvcConfigurer {
                 .excludePathPatterns(
                         "/user/login",
                         "/user/add",
-                        "/knowledge/category/tree",
-                        "/knowledge/article/page",
-                        "/knowledge/article/*",
                         "/file/uploads/**",
                         "/error"
                 );
+        registry.addInterceptor(adminAuthorizationInterceptor)
+                .addPathPatterns("/**");
     }
 
     @Override

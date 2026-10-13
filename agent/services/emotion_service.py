@@ -1,5 +1,7 @@
 ﻿import json
+import logging
 import re
+import hashlib
 from typing import Dict, List
 
 from langchain_openai import ChatOpenAI
@@ -7,6 +9,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 import config
 from prompts.emotion_prompt import EMOTION_SYSTEM_PROMPT, EMOTION_USER_TEMPLATE
+from services.llm_governance import llm_call_governor
+
+logger = logging.getLogger(__name__)
 
 
 class EmotionService:
@@ -19,6 +24,8 @@ class EmotionService:
             base_url=config.DEEPSEEK_BASE_URL,
             temperature=0.3,
             max_tokens=512,
+            timeout=config.LLM_REQUEST_TIMEOUT_SECONDS,
+            max_retries=1,
         )
 
     def _format_conversation(self, messages: List[Dict]) -> str:
@@ -32,32 +39,48 @@ class EmotionService:
         return "\n".join(lines)
 
     def _parse_json_response(self, text: str) -> Dict:
-        """Parse JSON from LLM response, handling markdown code blocks."""
-        # Remove markdown code block markers if present
+        """Parse and validate the model's risk result."""
         text = text.strip()
-        if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?\s*", "", text)
-            text = re.sub(r"\s*```$", "", text)
+        marker = chr(96) * 3
+        if text.startswith(marker):
+            text = re.sub(r"^" + marker + r"(?:json)?\s*", "", text)
+            text = re.sub(r"\s*" + marker + r"$", "", text)
 
         try:
-            return json.loads(text)
+            result = json.loads(text)
         except json.JSONDecodeError:
-            # Fallback: return a default analysis
-            return {
-                "primaryEmotion": "平静",
-                "emotionScore": 50,
-                "riskLevel": 0,
-                "riskDescription": "当前情绪状态正常",
-                "isNegative": False,
-                "suggestion": "保持积极的心态",
-                "improvementSuggestions": [
-                    "保持规律作息",
-                    "适当运动",
-                    "与朋友交流"
-                ]
-            }
+            return self._unknown_analysis("模型返回内容无法解析，暂不能判断风险")
 
-    async def analyze_emotion(self, messages: List[Dict]) -> Dict:
+        if not isinstance(result, dict):
+            return self._unknown_analysis("模型返回内容格式无效，暂不能判断风险")
+
+        risk_level = result.get("riskLevel")
+        if isinstance(risk_level, str) and risk_level.isdigit():
+            risk_level = int(risk_level)
+        if isinstance(risk_level, bool) or not isinstance(risk_level, int) or risk_level not in range(4):
+            return self._unknown_analysis("模型未返回有效风险等级，暂不能判断风险")
+
+        result["riskLevel"] = risk_level
+        result["riskStatus"] = "known"
+        result["analysisStatus"] = "complete"
+        return result
+
+    @staticmethod
+    def _unknown_analysis(description: str) -> Dict:
+        """Fail closed: unavailable analysis must never look like a normal result."""
+        return {
+            "primaryEmotion": "暂不可判断",
+            "emotionScore": None,
+            "riskLevel": None,
+            "riskStatus": "unknown",
+            "analysisStatus": "unavailable",
+            "riskDescription": description,
+            "isNegative": None,
+            "suggestion": "当前分析不可用；如果你正处于紧急危险中，请联系身边可信任的人或当地紧急服务。",
+            "improvementSuggestions": [],
+        }
+
+    async def analyze_emotion(self, messages: List[Dict], request_context: Dict | None = None) -> Dict:
         """
         Analyze the emotional state based on conversation messages.
         Returns a dict matching the frontend EmotionAnalysis type.
@@ -71,19 +94,16 @@ class EmotionService:
         ]
 
         try:
-            response = await self.llm.ainvoke(llm_messages)
+            response = await llm_call_governor.invoke(
+                self.llm, llm_messages, "emotion-analysis",
+                request_context=request_context,
+                prompt_version=hashlib.sha256(EMOTION_SYSTEM_PROMPT.encode("utf-8")).hexdigest()[:12],
+            )
             result = self._parse_json_response(response.content)
             return result
-        except Exception as e:
-            return {
-                "primaryEmotion": "平静",
-                "emotionScore": 50,
-                "riskLevel": 0,
-                "riskDescription": f"分析暂不可用: {str(e)}",
-                "isNegative": False,
-                "suggestion": "请稍后再试",
-                "improvementSuggestions": []
-            }
+        except Exception:
+            logger.exception("Emotion analysis provider failed")
+            return self._unknown_analysis("情绪分析暂时不可用，暂不能判断风险")
 
 
 # Singleton

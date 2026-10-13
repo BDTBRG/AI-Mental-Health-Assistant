@@ -30,7 +30,8 @@ public class MockChatAgent implements ChatAgent {
 
     @Override
     public Flux<String> streamResponse(Long sessionId, String userMessage,
-                                       List<ConsultationMessage> history) {
+                                       List<ConsultationMessage> history,
+                                       Map<String, Object> context) {
         String response;
         if (history == null || history.size() <= 1) {
             response = GREETING_RESPONSES.get(new Random().nextInt(GREETING_RESPONSES.size()));
@@ -45,7 +46,8 @@ public class MockChatAgent implements ChatAgent {
 
     @Override
     public Map<String, Object> analyzeEmotion(Long sessionId,
-                                               List<ConsultationMessage> messages) {
+                                               List<ConsultationMessage> messages,
+                                               Long userId) {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("primaryEmotion", "平静");
         result.put("emotionScore", 60);

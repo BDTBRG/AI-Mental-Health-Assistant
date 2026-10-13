@@ -7,4 +7,5 @@ public class SessionPageQuery {
     private Integer pageNum = 1;
     private Integer pageSize = 10;
     private String emotionTag;
+    private String reviewStatus;
 }

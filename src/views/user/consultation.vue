@@ -23,14 +23,19 @@
 						{{ currentEmotion.primaryEmotion }}
 					</div>
 					<div class="emotion-score">
-						{{ currentEmotion.emotionScore }}
+						{{ currentEmotion.emotionScore ?? '—' }}
 					</div>
 				</div>
 				<div class="warm-tips">
 					<div class="emotion-status-text">
 						<span class="status-label">今天感觉</span>
 						<span class="status-emotion">{{
-							currentEmotion.isNegative ? '需要关注' : '很不错'
+							currentEmotion.riskStatus === 'unknown' ||
+							currentEmotion.isNegative === null
+								? '暂不可判断'
+								: currentEmotion.isNegative
+									? '需要关注'
+									: '很不错'
 						}}</span>
 					</div>
 					<div class="emotion-intensity">
@@ -78,12 +83,18 @@
 					<div
 						class="risk-notice"
 						v-if="
-							currentEmotion.isNegative &&
-							currentEmotion.riskLevel > 1
+							currentEmotion.analysisStatus === 'unavailable' ||
+							(currentEmotion.isNegative === true &&
+								currentEmotion.riskLevel != null &&
+								currentEmotion.riskLevel > 1)
 						">
 						<div class="notice-icon">🤗</div>
 						<div class="notice-content">
-							<div class="notice-title">温馨提示</div>
+							<div class="notice-title">{{
+								currentEmotion.analysisStatus === 'unavailable'
+									? '分析暂不可用'
+									: '温馨提示'
+							}}</div>
 							<div class="notice-text">
 								{{ currentEmotion.riskDescription }}
 							</div>
@@ -151,14 +162,36 @@
 					</div>
 					<div class="chat-info">
 						<h2>宁渡AI助手</h2>
-						<p>随时倾听，温暖陪伴</p>
+					<p>随时倾听，温暖陪伴</p>
 					</div>
+				</div>
+				<div class="review-consent">
+					<el-checkbox
+						v-model="reviewConsent"
+						@change="handleReviewConsentChange">
+						允许授权人员查看本次对话以进行人工复核
+					</el-checkbox>
+					<el-tooltip content="默认关闭。授权后，管理端复核队列可查看本次对话；你可以随时撤回。" placement="bottom">
+						<el-icon class="consent-help"><InfoFilled /></el-icon>
+					</el-tooltip>
+					<el-button text type="primary" size="small" @click="openMemoryDialog">管理个性化记忆</el-button>
+					<el-button
+						v-if="currentSession.status !== 'TEMP' && reviewConsent"
+						:disabled="isAiTying || ['PENDING', 'IN_PROGRESS'].includes(reviewStatus)"
+						size="small"
+						type="warning"
+						@click="handleRequestReview">
+						{{ reviewStatus === 'PENDING' ? '等待人工复核' : reviewStatus === 'IN_PROGRESS' ? '人工复核处理中' : '申请人工复核' }}
+					</el-button>
 				</div>
 				<el-button circle @click="createNewSession" title="新建会话">
 					<el-icon><Plus /></el-icon>
 				</el-button>
 			</div>
-			<div class="chat-messages">
+			<div ref="chatMessagesContainer" class="chat-messages">
+				<el-button v-if="hasOlderMessages" text type="primary" class="load-older" @click="loadOlderMessages">
+					加载更早的对话（{{ messageList.length - renderedMessages.length }} 条）
+				</el-button>
 				<div v-if="!messageList.length" class="message-item ai-message">
 					<div class="message-avatar">
 						<el-image
@@ -176,7 +209,8 @@
 					</div>
 				</div>
 				<div
-					v-for="message in messageList"
+					v-for="message in renderedMessages"
+					:key="message.id"
 					class="message-item"
 					:class="
 						message.senderType === 1 ? 'user-message' : 'ai-message'
@@ -248,13 +282,56 @@
 			</div>
 		</div>
 	</div>
+	<el-dialog v-model="showMemoryDialog" title="个性化记忆" width="600px">
+		<el-alert type="info" :closable="false" show-icon>
+			<template #title>只有你主动保存的信息会作为个人化背景。关闭授权后，后续对话不再读取记忆或近期自评；删除会立即清除已保存内容。</template>
+		</el-alert>
+		<div class="memory-consent-row">
+			<span>允许使用个性化记忆</span>
+			<el-switch v-model="memoryEnabled" :disabled="memoryLoading || isAiTying" @change="handleMemoryConsentChange" />
+		</div>
+		<div v-if="memoryEnabled" class="memory-editor">
+			<el-input v-model="memoryDraft" type="textarea" :rows="3" maxlength="500" show-word-limit placeholder="例如：我更喜欢简短直接的建议；工作日晚上通常有时间练习" />
+			<div class="memory-editor-footer">
+				<el-date-picker v-model="memoryExpiresAt" type="date" value-format="YYYY-MM-DD" clearable placeholder="有效期（可选）" />
+				<div>
+					<el-button v-if="editingMemoryId !== null" @click="resetMemoryEditor">取消编辑</el-button>
+					<el-button type="primary" :loading="memorySaving" @click="saveAgentMemory">{{ editingMemoryId === null ? '保存记忆' : '保存修改' }}</el-button>
+				</div>
+			</div>
+		</div>
+		<el-empty v-if="!agentMemories.length" :description="memoryEnabled ? '还没有主动保存的记忆' : '没有已保存的记忆'" :image-size="70" />
+		<div v-if="agentMemories.length" class="memory-list">
+			<div v-for="memory in agentMemories" :key="memory.id" class="memory-item">
+				<div class="memory-content">{{ memory.content }}</div>
+				<div class="memory-meta">来源：用户主动添加 · {{ memory.expiresAt ? `有效至 ${memory.expiresAt}` : '长期有效' }}</div>
+				<div class="memory-actions">
+					<el-button text type="primary" @click="editAgentMemory(memory)">纠正</el-button>
+					<el-button text type="danger" @click="removeAgentMemory(memory.id)">删除</el-button>
+				</div>
+			</div>
+		</div>
+		<template #footer>
+			<el-button v-if="agentMemories.length" type="danger" plain @click="clearAllAgentMemories">删除全部并撤回授权</el-button>
+			<el-button @click="showMemoryDialog = false">关闭</el-button>
+		</template>
+	</el-dialog>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, nextTick, ref, onMounted } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
 	startSession,
+	updateReviewConsent,
+	requestHumanReview,
+	getPersonalizationConsent,
+	setPersonalizationConsent,
+	getAgentMemories,
+	createAgentMemory,
+	updateAgentMemory,
+	deleteAgentMemory,
+	clearAgentMemories,
 	getHistorySessionList,
 	deleteSession,
 	getHistorySessionMessages,
@@ -265,6 +342,7 @@ import type {
 	ListData,
 	Message,
 	EmotionAnalysis,
+	AgentMemoryItem,
 } from '@/types/user'
 import MarkdownRenderer from '@/components/MarkdownRenderer.vue'
 import { fetchEventSource } from '@microsoft/fetch-event-source'
@@ -274,6 +352,7 @@ const iconUrl2 = new URL('@/assets/like.png', import.meta.url).href
 const iconUrl3 = new URL('@/assets/users.png', import.meta.url).href
 
 const isAiTying = ref<boolean>(false)
+const activeStreamController = ref<AbortController | null>(null)
 
 const currentSession = ref<Record<string, string>>({
 	sessionId: `temp_${Date.now()}`,
@@ -283,20 +362,152 @@ const currentSession = ref<Record<string, string>>({
 
 const userMessage = ref<string>('')
 
+const reviewConsent = ref(false)
+const reviewStatus = ref<'NONE' | 'PENDING' | 'IN_PROGRESS' | 'RESOLVED' | 'CANCELLED'>('NONE')
+const showMemoryDialog = ref(false)
+const memoryLoading = ref(false)
+const memorySaving = ref(false)
+const memoryEnabled = ref(false)
+const agentMemories = ref<AgentMemoryItem[]>([])
+const memoryDraft = ref('')
+const memoryExpiresAt = ref<string | null>(null)
+const editingMemoryId = ref<number | null>(null)
+
+const openMemoryDialog = async () => {
+	showMemoryDialog.value = true
+	memoryLoading.value = true
+	try {
+		const [consent, memories] = await Promise.all([
+			getPersonalizationConsent(),
+			getAgentMemories(),
+		])
+		memoryEnabled.value = consent.enabled
+		agentMemories.value = memories
+	} catch {
+		ElMessage.error('读取个性化记忆失败')
+	} finally {
+		memoryLoading.value = false
+	}
+}
+
+const handleMemoryConsentChange = async (allowed: string | number | boolean) => {
+	const nextValue = Boolean(allowed)
+	try {
+		await setPersonalizationConsent(nextValue)
+		ElMessage.success(nextValue ? '已开启个性化记忆' : '已关闭个性化记忆读取')
+	} catch {
+		memoryEnabled.value = !nextValue
+	}
+}
+
+const resetMemoryEditor = () => {
+	editingMemoryId.value = null
+	memoryDraft.value = ''
+	memoryExpiresAt.value = null
+}
+
+const saveAgentMemory = async () => {
+	const content = memoryDraft.value.trim()
+	if (!content) {
+		ElMessage.warning('请先填写需要记住的内容')
+		return
+	}
+	memorySaving.value = true
+	try {
+		const payload = { content, expiresAt: memoryExpiresAt.value }
+		if (editingMemoryId.value === null) {
+			const created = await createAgentMemory(payload)
+			agentMemories.value.unshift(created)
+		} else {
+			await updateAgentMemory(editingMemoryId.value, payload)
+			agentMemories.value = await getAgentMemories()
+		}
+		resetMemoryEditor()
+		ElMessage.success('个性化记忆已保存')
+	} catch {
+		ElMessage.error('保存失败，请刷新后重试')
+	} finally {
+		memorySaving.value = false
+	}
+}
+
+const editAgentMemory = (memory: AgentMemoryItem) => {
+	editingMemoryId.value = memory.id
+	memoryDraft.value = memory.content
+	memoryExpiresAt.value = memory.expiresAt
+}
+
+const removeAgentMemory = async (id: number) => {
+	try {
+		await deleteAgentMemory(id)
+		agentMemories.value = agentMemories.value.filter(memory => memory.id !== id)
+		if (editingMemoryId.value === id) resetMemoryEditor()
+	} catch {
+		ElMessage.error('删除失败，请刷新后重试')
+	}
+}
+
+const clearAllAgentMemories = async () => {
+	try {
+		await ElMessageBox.confirm('删除后，已保存的个人记忆会被清除，个性化记忆授权也会关闭。', '确认删除全部记忆', { type: 'warning' })
+		await clearAgentMemories()
+		agentMemories.value = []
+		memoryEnabled.value = false
+		resetMemoryEditor()
+		ElMessage.success('已删除全部记忆并撤回授权')
+	} catch (error) {
+		if (error !== 'cancel' && error !== 'close') ElMessage.error('操作失败')
+	}
+}
+
 const messageList = ref<Message[]>([])
+const chatMessagesContainer = ref<HTMLElement | null>(null)
+const visibleMessageCount = ref(40)
+const renderedMessages = computed(() => messageList.value.slice(-visibleMessageCount.value))
+const hasOlderMessages = computed(() => messageList.value.length > visibleMessageCount.value)
+const createLocalMessageId = () => Number(`${Date.now()}${Math.floor(Math.random() * 1000)}`)
+
+const scrollChatToBottom = async () => {
+	await nextTick()
+	const container = chatMessagesContainer.value
+	if (container) container.scrollTop = container.scrollHeight
+}
+
+const loadOlderMessages = async () => {
+	const container = chatMessagesContainer.value
+	const previousHeight = container?.scrollHeight ?? 0
+	const previousTop = container?.scrollTop ?? 0
+	visibleMessageCount.value += 40
+	await nextTick()
+	if (container) container.scrollTop = previousTop + container.scrollHeight - previousHeight
+}
 
 const sessionList = ref<HistorySession[]>([])
 
-const currentEmotion = ref<EmotionAnalysis>({
+const createEmptyEmotion = (): EmotionAnalysis => ({
 	primaryEmotion: '等待分析',
-	emotionScore: 50,
-	isNegative: false,
-	riskLevel: 0,
+	emotionScore: null,
+	isNegative: null,
+	riskLevel: null,
+	riskStatus: 'unknown',
+	analysisStatus: 'idle',
 	suggestion: '开始对话后，AI将实时分析你的情绪状态',
 	improvementSuggestions: [],
 	riskDescription:
 		'尚未开始分析',
 })
+
+const currentEmotion = ref<EmotionAnalysis>(createEmptyEmotion())
+let emotionRequestSequence = 0
+let sessionLoadSequence = 0
+
+const normalizeSessionId = (sessionId: string) =>
+	sessionId.startsWith('session_') ? sessionId.slice('session_'.length) : sessionId
+
+const resetCurrentEmotion = () => {
+	emotionRequestSequence++
+	currentEmotion.value = createEmptyEmotion()
+}
 
 const createNewSession = async () => {
 	currentSession.value = {
@@ -305,6 +516,38 @@ const createNewSession = async () => {
 		sessionTitle: `宁渡AI助手-${new Date().toLocaleString()}`,
 	}
 	messageList.value = []
+	visibleMessageCount.value = 40
+	reviewConsent.value = false
+	reviewStatus.value = 'NONE'
+	resetCurrentEmotion()
+}
+
+const handleReviewConsentChange = async (allowed: string | number | boolean) => {
+	const nextValue = Boolean(allowed)
+	if (currentSession.value.status === 'TEMP') return
+
+	try {
+		await updateReviewConsent(currentSession.value.sessionId, nextValue)
+		ElMessage.success(nextValue ? '已授权本次会话人工复核' : '已撤回本次会话复核授权')
+		if (!nextValue && ['PENDING', 'IN_PROGRESS'].includes(reviewStatus.value)) {
+			reviewStatus.value = 'CANCELLED'
+		}
+		getHistorySessionPage()
+	} catch {
+		reviewConsent.value = !nextValue
+	}
+}
+
+const handleRequestReview = async () => {
+	if (!reviewConsent.value || currentSession.value.status === 'TEMP') return
+	try {
+		await requestHumanReview(currentSession.value.sessionId)
+		reviewStatus.value = 'PENDING'
+		ElMessage.success('已提交人工复核申请')
+		await getHistorySessionPage()
+	} catch {
+		ElMessage.error('提交复核申请失败，请刷新后重试')
+	}
 }
 
 const sendMessage = () => {
@@ -334,7 +577,12 @@ const sendMessage = () => {
 			content: message,
 			createdAt: new Date().toISOString(),
 		})
-		startAiResponse(currentSession.value.sessionId, message)
+		scrollChatToBottom()
+		startAiResponse(
+			currentSession.value.sessionId,
+			message,
+			createClientRequestId(),
+		)
 	}
 }
 
@@ -342,6 +590,7 @@ const startNewSession = async (message: string) => {
 	const sessionParams = {
 		initialMessage: message,
 		sessionTitle: currentSession.value.sessionTitle,
+		reviewConsent: reviewConsent.value,
 	}
 	const data = await startSession(sessionParams)
 	console.log('新会话数据：', data)
@@ -357,21 +606,36 @@ const startNewSession = async (message: string) => {
 		content: message,
 		createdAt: new Date().toISOString(),
 	})
+	scrollChatToBottom()
 
 	// 开始流式对话
-	startAiResponse(data.sessionId.toString(), message)
+	startAiResponse(
+		data.sessionId.toString(),
+		message,
+		createClientRequestId(),
+	)
 }
 
-const startAiResponse = async (sessionId: string, userMessage: string) => {
+const createClientRequestId = () =>
+	window.crypto?.randomUUID?.() ??
+	`req-${Date.now()}-${Math.random().toString(36).slice(2)}`
+
+const pendingTurnKey = (sessionId: string) =>
+	`amha:pending-chat-turn:${sessionId}`
+
+const startAiResponse = async (
+	sessionId: string,
+	userMessage: string,
+	clientRequestId: string,
+) => {
 	if (isAiTying.value) {
 		ElMessage.warning('AI正在输入，请稍后...')
 		return
 	}
 	isAiTying.value = true
+	sessionStorage.setItem(pendingTurnKey(sessionId), clientRequestId)
 	const aiMessage: Message = {
-		id: Number(
-			`ai_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-		),
+		id: createLocalMessageId(),
 		sessionId: Number(sessionId),
 		senderType: 2,
 		content: '',
@@ -379,9 +643,13 @@ const startAiResponse = async (sessionId: string, userMessage: string) => {
 		isError: false,
 	}
 	messageList.value.push(aiMessage)
+	scrollChatToBottom()
 
 	try {
 		const ctrl = new AbortController()
+		activeStreamController.value = ctrl
+		let streamFinished = false
+		let reconnectNoticeShown = false
 		fetchEventSource('/api/psychological-chat/stream', {
 			method: 'POST',
 			headers: {
@@ -391,12 +659,13 @@ const startAiResponse = async (sessionId: string, userMessage: string) => {
 			},
 			body: JSON.stringify({
 				sessionId,
+				clientRequestId,
 				userMessage,
 			}),
 			signal: ctrl.signal,
 			async onopen(response) {
 				if (
-					response.headers.get('Content-Type') !== 'text/event-stream'
+					!response.headers.get('Content-Type')?.includes('text/event-stream')
 				) {
 					ElMessage.error('服务器返回了非流式数据，无法开始对话')
 					isAiTying.value = false
@@ -411,44 +680,50 @@ const startAiResponse = async (sessionId: string, userMessage: string) => {
 				const aiMessage =
 					messageList.value[messageList.value.length - 1]
 				if (eventName === 'done') {
+					streamFinished = true
 					isAiTying.value = false
+					sessionStorage.removeItem(pendingTurnKey(sessionId))
 					ctrl.abort()
-					getCurrentEmotion(currentSession.value.sessionId)
+					getCurrentEmotion(sessionId)
 					getHistorySessionPage()
+					return
+				}
+				if (eventName === 'reset') {
+					aiMessage.content = ''
+					aiMessage.isError = false
 					return
 				}
 				const payload = JSON.parse(raw)
 				if (String(payload.code) === '200' && payload.data.content) {
 					aiMessage.content += payload.data.content
+					scrollChatToBottom()
 				} else {
-					const aiMessage =
-						messageList.value[messageList.value.length - 1]
-					if (aiMessage) {
-						aiMessage.content =
-							payload.message || 'AI回复失败，请稍后再试'
-						aiMessage.isError = true
-					}
+					streamFinished = true
+					aiMessage.content = payload.message || 'AI回复失败，请稍后再试'
+					aiMessage.isError = true
 					isAiTying.value = false
+					sessionStorage.removeItem(pendingTurnKey(sessionId))
 					ElMessage.error(payload.message || 'AI回复失败，请稍后再试')
+					ctrl.abort()
 				}
 			},
-			onerror: err => {
-				const aiMessage =
-					messageList.value[messageList.value.length - 1]
-				if (aiMessage) {
-					aiMessage.content = err.message || 'AI回复失败，请稍后再试'
-					aiMessage.isError = true
+			onerror: () => {
+				if (!reconnectNoticeShown) {
+					ElMessage.warning('连接中断，正在恢复本轮回复…')
+					reconnectNoticeShown = true
 				}
-				isAiTying.value = false
-				ElMessage.error(err.message || 'AI回复失败，请稍后再试')
-				throw err
+				// Returning lets fetch-event-source retry with its Last-Event-ID cursor.
 			},
 			onclose: () => {
-				getCurrentEmotion(currentSession.value.sessionId)
-				isAiTying.value = false
+				if (streamFinished) {
+					getCurrentEmotion(sessionId)
+					isAiTying.value = false
+					activeStreamController.value = null
+				}
 			},
 		})
 	} catch (error) {
+		if (error instanceof Error && error.name === 'AbortError') return
 		console.error('流式请求失败:', error)
 		isAiTying.value = false
 		ElMessage.error('连接失败，请重试')
@@ -472,13 +747,34 @@ const handleEnter = (event: KeyboardEvent) => {
 }
 
 const handleSwitchSession = async (session: HistorySession) => {
-	const data = await getHistorySessionMessages(session.id.toString())
-	// console.log('会话消息数据：', data)
-	messageList.value = data
+	const loadSequence = ++sessionLoadSequence
+	activeStreamController.value?.abort()
+	activeStreamController.value = null
+	isAiTying.value = false
 	currentSession.value.sessionId = session.id.toString()
 	currentSession.value.status = 'ACTIVE'
 	currentSession.value.sessionTitle = session.sessionTitle
+	reviewConsent.value = Boolean(session.reviewConsent)
+	reviewStatus.value = session.reviewStatus ?? 'NONE'
+	resetCurrentEmotion()
+	const data = await getHistorySessionMessages(session.id.toString())
+	if (loadSequence !== sessionLoadSequence) return
+	// console.log('会话消息数据：', data)
+	messageList.value = data
+	visibleMessageCount.value = 40
 	getCurrentEmotion(session.id.toString())
+	const pendingRequestId = sessionStorage.getItem(
+		pendingTurnKey(session.id.toString()),
+	)
+	const lastUserMessage = [...data].reverse().find(item => item.senderType === 1)
+	if (pendingRequestId && lastUserMessage) {
+		startAiResponse(
+			session.id.toString(),
+			lastUserMessage.content,
+			pendingRequestId,
+		)
+	}
+	else scrollChatToBottom()
 }
 
 const handleDeleteSession = async (sessionId: string) => {
@@ -500,13 +796,15 @@ const formatMessage = (html: string): string => {
 	return html.replace(/\n/g, '<br>')
 }
 
-const getIntensityClass = (score: number): number => {
+const getIntensityClass = (score: number | null): number => {
+	if (score === null) return 0
 	if (score >= 61) return 3
 	if (score >= 31) return 2
 	return 1
 }
 
-const getRiskText = (level: number): string => {
+const getRiskText = (level: number | null): string => {
+	if (level === null) return '未知'
 	switch (level) {
 		case 0:
 			return '正常'
@@ -522,19 +820,25 @@ const getRiskText = (level: number): string => {
 }
 
 const getCurrentEmotion = async (sessionId: string) => {
-	if (sessionId.startsWith('temp_')) {
+	const requestedSessionId = normalizeSessionId(sessionId)
+	if (normalizeSessionId(currentSession.value.sessionId) !== requestedSessionId) {
 		return
 	}
-	sessionId =
-		sessionId.startsWith('session_') ? sessionId : `session_${"${"}sessionId}`
+	if (sessionId.startsWith('temp_')) {
+		resetCurrentEmotion()
+		return
+	}
+	const requestSequence = ++emotionRequestSequence
+	currentEmotion.value = createEmptyEmotion()
 	try {
-		const data = await getEmotionAnalysis(sessionId)
-		console.log('情绪分析数据：', data)
-		if (data && data.primaryEmotion) {
-			currentEmotion.value = data
-		}
+		const data = await getEmotionAnalysis(`session_${requestedSessionId}`)
+		if (
+			requestSequence !== emotionRequestSequence ||
+			normalizeSessionId(currentSession.value.sessionId) !== requestedSessionId
+		) return
+		currentEmotion.value = data?.primaryEmotion ? data : createEmptyEmotion()
 	} catch {
-		// 静默失败，保持默认值
+		// 静默失败，维持当前会话的默认状态
 	}
 }
 
@@ -947,7 +1251,7 @@ onMounted(() => {
 		flex-direction: column;
 		overflow: hidden;
 		flex: 1;
-		.chat-header {
+	.chat-header {
 			background: linear-gradient(135deg, #fb923c 0%, #f59e0b 100%);
 			color: white;
 			padding: 20px 24px;
@@ -1000,6 +1304,7 @@ onMounted(() => {
 			max-height: calc(100vh - 200px);
 			scrollbar-width: thin;
 			scrollbar-color: rgba(251, 146, 60, 0.3) transparent;
+			.load-older { align-self: center; flex-shrink: 0; }
 			.message-item {
 				display: flex;
 				align-items: flex-start;
@@ -1122,6 +1427,26 @@ onMounted(() => {
 				transition: all 0.3s ease;
 			}
 		}
+	}
+	.review-consent {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		max-width: 350px;
+		font-size: 12px;
+		color: #6b7280;
+	}
+	.memory-consent-row { display: flex; align-items: center; justify-content: space-between; margin: 18px 0; padding: 12px 14px; background: #f8fafc; border-radius: 8px; color: #374151; }
+	.memory-editor { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
+	.memory-editor-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+	.memory-list { display: flex; flex-direction: column; gap: 10px; max-height: 260px; overflow-y: auto; }
+	.memory-item { padding: 12px; border: 1px solid #e5e7eb; border-radius: 8px; }
+	.memory-content { color: #374151; line-height: 1.6; white-space: pre-wrap; }
+	.memory-meta { margin-top: 5px; color: #9ca3af; font-size: 12px; }
+	.memory-actions { display: flex; justify-content: flex-end; margin-top: 4px; }
+	.consent-help {
+		color: #9ca3af;
+		cursor: help;
 	}
 }
 </style>

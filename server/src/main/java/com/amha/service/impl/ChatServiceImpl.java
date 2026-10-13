@@ -5,25 +5,53 @@ import com.amha.common.BusinessException;
 import com.amha.common.PageResult;
 import com.amha.dto.*;
 import com.amha.entity.ConsultationMessage;
+import com.amha.entity.ConsultationChatTurn;
+import com.amha.entity.ConsultationReviewAudit;
 import com.amha.entity.ConsultationSession;
+import com.amha.entity.ConsultationStreamEvent;
+import com.amha.entity.EmotionDiary;
+import com.amha.entity.AgentMemory;
+import com.amha.entity.AgentMemorySettings;
 import com.amha.entity.User;
+import com.amha.mapper.ConsultationChatTurnMapper;
 import com.amha.mapper.ConsultationMessageMapper;
+import com.amha.mapper.ConsultationReviewAuditMapper;
 import com.amha.mapper.ConsultationSessionMapper;
+import com.amha.mapper.ConsultationStreamEventMapper;
+import com.amha.mapper.EmotionDiaryMapper;
+import com.amha.mapper.AgentMemoryMapper;
+import com.amha.mapper.AgentMemorySettingsMapper;
 import com.amha.mapper.UserMapper;
 import com.amha.service.ChatService;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import reactor.core.Disposable;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -33,12 +61,22 @@ public class ChatServiceImpl implements ChatService {
 
     private final ConsultationSessionMapper sessionMapper;
     private final ConsultationMessageMapper messageMapper;
+    private final ConsultationReviewAuditMapper reviewAuditMapper;
+    private final ConsultationChatTurnMapper chatTurnMapper;
+    private final ConsultationStreamEventMapper streamEventMapper;
+    private final AgentCheckpointPurgeOutboxService checkpointPurgeOutboxService;
+    private final ChatTurnStore chatTurnStore;
+    private final EmotionDiaryMapper diaryMapper;
+    private final AgentMemoryMapper agentMemoryMapper;
+    private final AgentMemorySettingsMapper agentMemorySettingsMapper;
     private final UserMapper userMapper;
+    private final ObjectMapper objectMapper;
 
     @Qualifier("realChatAgent")
     private final ChatAgent chatAgent;
 
     @Override
+    @Transactional
     public StartSessionResponse startSession(StartSessionRequest request, Long userId) {
         ConsultationSession session = new ConsultationSession();
         session.setUserId(userId);
@@ -46,7 +84,18 @@ public class ChatServiceImpl implements ChatService {
         session.setStatus("ACTIVE");
         session.setStartedAt(LocalDateTime.now());
         session.setMessageCount(0);
+        session.setReviewConsent(Boolean.TRUE.equals(request.getReviewConsent()));
+        if (Boolean.TRUE.equals(session.getReviewConsent())) {
+            session.setReviewConsentUpdatedAt(LocalDateTime.now());
+        }
         sessionMapper.insert(session);
+        if (Boolean.TRUE.equals(session.getReviewConsent())) {
+            ConsultationReviewAudit audit = new ConsultationReviewAudit();
+            audit.setSessionId(session.getId());
+            audit.setActorUserId(userId);
+            audit.setAction("CONSENT_GRANTED");
+            reviewAuditMapper.insert(audit);
+        }
 
         return StartSessionResponse.builder()
                 .sessionId(session.getId())
@@ -63,6 +112,18 @@ public class ChatServiceImpl implements ChatService {
         LambdaQueryWrapper<ConsultationSession> wrapper = new LambdaQueryWrapper<>();
         if (userId != null) {
             wrapper.eq(ConsultationSession::getUserId, userId);
+        } else {
+            // 只有明确申请复核且尚未撤回授权的会话可以进入人工工作台。
+            wrapper.eq(ConsultationSession::getReviewConsent, true);
+            String reviewStatus = query.getReviewStatus();
+            if (reviewStatus == null || reviewStatus.isBlank()) {
+                reviewStatus = "PENDING";
+            }
+            if (List.of("PENDING", "IN_PROGRESS", "RESOLVED").contains(reviewStatus)) {
+                wrapper.eq(ConsultationSession::getReviewStatus, reviewStatus);
+            } else {
+                wrapper.eq(ConsultationSession::getId, -1L);
+            }
         }
         wrapper.orderByDesc(ConsultationSession::getLastMessageTime)
                .orderByDesc(ConsultationSession::getCreatedAt);
@@ -82,6 +143,10 @@ public class ChatServiceImpl implements ChatService {
                     .messageCount(session.getMessageCount())
                     .lastMessageContent(session.getLastMessageContent())
                     .lastMessageTime(session.getLastMessageTime())
+                    .reviewConsent(session.getReviewConsent())
+                    .reviewStatus(session.getReviewStatus())
+                    .reviewAssigneeId(session.getReviewAssigneeId())
+                    .reviewVersion(session.getReviewVersion())
                     .build();
         }).collect(Collectors.toList());
 
@@ -89,22 +154,35 @@ public class ChatServiceImpl implements ChatService {
     }
 
     @Override
+    @Transactional
     public void deleteSession(Long sessionId, Long userId) {
-        ConsultationSession session = sessionMapper.selectById(sessionId);
+        ConsultationSession session = sessionMapper.selectByIdForUpdate(sessionId);
         if (session == null) {
             throw new BusinessException("会话不存在");
         }
-        User user = userMapper.selectById(userId);
-        if (user.getUserType() != 2 && !session.getUserId().equals(userId)) {
-            throw new BusinessException("无权删除该会话");
+        if (userId == null || !session.getUserId().equals(userId)) {
+            throw new BusinessException("403", "仅会话所有者可删除该会话");
         }
+        Long runningTurns = chatTurnMapper.selectCount(new LambdaQueryWrapper<ConsultationChatTurn>()
+                .eq(ConsultationChatTurn::getSessionId, sessionId)
+                .eq(ConsultationChatTurn::getStatus, "RUNNING"));
+        if (runningTurns != null && runningTurns > 0) {
+            throw new BusinessException("409", "会话仍有回复生成中，请稍后删除");
+        }
+        streamEventMapper.delete(new LambdaQueryWrapper<ConsultationStreamEvent>()
+                .eq(ConsultationStreamEvent::getSessionId, sessionId));
+        checkpointPurgeOutboxService.enqueueSession(sessionId, userId);
+        chatTurnMapper.delete(new LambdaQueryWrapper<ConsultationChatTurn>()
+                .eq(ConsultationChatTurn::getSessionId, sessionId));
         messageMapper.delete(new LambdaQueryWrapper<ConsultationMessage>()
                 .eq(ConsultationMessage::getSessionId, sessionId));
         sessionMapper.deleteById(sessionId);
     }
 
     @Override
-    public List<ConsultationMessageVO> getSessionMessages(Long sessionId) {
+    public List<ConsultationMessageVO> getSessionMessages(Long sessionId, Long userId, Integer userType) {
+        ConsultationSession session = requireReadableSession(sessionId, userId, userType);
+        recordReviewRead(session, userId, "READ_MESSAGES");
         List<ConsultationMessage> messages = messageMapper.selectList(
                 new LambdaQueryWrapper<ConsultationMessage>()
                         .eq(ConsultationMessage::getSessionId, sessionId)
@@ -133,105 +211,362 @@ public class ChatServiceImpl implements ChatService {
     }
 
     @Override
-    public SseEmitter streamChat(ChatStreamRequest request, Long userId) {
+    public SseEmitter streamChat(ChatStreamRequest request, Long userId, Long lastEventId) {
         Long sessionId = Long.parseLong(request.getSessionId());
         ConsultationSession session = sessionMapper.selectById(sessionId);
         if (session == null) {
             throw new BusinessException("会话不存在");
         }
+        if (userId == null || !userId.equals(session.getUserId())) {
+            throw new BusinessException("403", "无权访问该会话");
+        }
 
-        // 保存用户消息
-        ConsultationMessage userMsg = new ConsultationMessage();
-        userMsg.setSessionId(sessionId);
-        userMsg.setSenderType(1);
-        userMsg.setContent(request.getUserMessage());
-        messageMapper.insert(userMsg);
+        String requestId = request.getClientRequestId();
+        if (requestId == null || requestId.isBlank()) {
+            requestId = UUID.randomUUID().toString();
+        }
+        if (requestId.length() > 64) {
+            throw new BusinessException("400", "clientRequestId 长度不能超过64");
+        }
+        final String turnRequestId = requestId;
+        String userMessage = request.getUserMessage() == null ? "" : request.getUserMessage();
+        String requestHash = sha256(userMessage);
+        ChatTurnStore.TurnStart turnStart = chatTurnStore.beginTurn(sessionId, userId, turnRequestId,
+                requestHash, userMessage);
 
-        // 更新会话
-        session.setMessageCount(session.getMessageCount() + 1);
-        session.setLastMessageContent(request.getUserMessage());
-        session.setLastMessageTime(LocalDateTime.now());
-        sessionMapper.updateById(session);
-
-        // 获取历史消息（包含刚插入的用户消息作为上下文）
-        List<ConsultationMessage> history = messageMapper.selectList(
-                new LambdaQueryWrapper<ConsultationMessage>()
-                        .eq(ConsultationMessage::getSessionId, sessionId)
-                        .orderByAsc(ConsultationMessage::getCreatedAt));
-
-        // SSE流式响应
-        SseEmitter emitter = new SseEmitter(300000L); // 5分钟超时
-
-        final StringBuilder fullResponse = new StringBuilder();
-
-        chatAgent.streamResponse(sessionId, request.getUserMessage(), history)
-                .doOnNext(chunk -> {
-                    try {
+        SseEmitter emitter = new SseEmitter(300000L);
+        if (turnStart.shouldGenerate()) {
+            List<ConsultationMessage> history = messageMapper.selectList(
+                    new LambdaQueryWrapper<ConsultationMessage>()
+                            .eq(ConsultationMessage::getSessionId, sessionId)
+                            .orderByAsc(ConsultationMessage::getId));
+            if (!history.isEmpty()) {
+                ConsultationMessage lastMessage = history.get(history.size() - 1);
+                if (Integer.valueOf(1).equals(lastMessage.getSenderType())
+                        && userMessage.equals(lastMessage.getContent())) {
+                    history.remove(history.size() - 1);
+                }
+            }
+            AtomicInteger eventSequence = new AtomicInteger(
+                    chatTurnStore.nextSequence(sessionId, turnRequestId));
+            StringBuilder fullResponse = new StringBuilder();
+            Map<String, Object> agentContext = new java.util.LinkedHashMap<>(buildAgentContext(userId));
+            agentContext.put("sessionId", sessionId.toString());
+            agentContext.put("turnId", turnRequestId);
+            agentContext.put("userId", userId.toString());
+            Flux<String> response = chatAgent.streamResponse(sessionId, userMessage, history,
+                    agentContext);
+            if (response == null) {
+                response = Flux.error(new IllegalStateException("Agent returned an empty stream"));
+            }
+            response
+                    .filter(chunk -> chunk != null && !chunk.isEmpty())
+                    .publishOn(Schedulers.boundedElastic(), 1)
+                    .doOnNext(chunk -> {
                         fullResponse.append(chunk);
-                        String sseData = "{\"code\":\"200\",\"data\":{\"content\":\"" +
-                                escapeJson(chunk) + "\"}}";
-                        emitter.send(SseEmitter.event().name("message").data(sseData));
-                    } catch (Exception e) {
-                        log.error("SSE send error", e);
-                    }
-                })
-                .doOnComplete(() -> {
-                    try {
-                        // 保存AI回复到数据库
-                        String aiContent = fullResponse.toString();
-                        if (!aiContent.isEmpty()) {
-                            ConsultationMessage aiMsg = new ConsultationMessage();
-                            aiMsg.setSessionId(sessionId);
-                            aiMsg.setSenderType(2);
-                            aiMsg.setContent(aiContent);
-                            messageMapper.insert(aiMsg);
+                        chatTurnStore.appendChunk(sessionId, turnRequestId, turnStart.generationToken(),
+                                eventSequence.getAndIncrement(), messagePayload(chunk));
+                    })
+                    .doOnComplete(() -> chatTurnStore.completeTurn(sessionId, turnRequestId,
+                            turnStart.generationToken(),
+                            fullResponse.toString(), eventSequence.getAndIncrement(), donePayload()))
+                    .doOnError(error -> {
+                        log.error("SSE stream error for session {} request {}", sessionId, turnRequestId, error);
+                        chatTurnStore.failTurn(sessionId, turnRequestId, turnStart.generationToken(),
+                                eventSequence.getAndIncrement(),
+                                errorPayload());
+                    })
+                    .subscribe(ignored -> { }, error -> log.debug("Agent stream terminated for request {}", turnRequestId));
+        }
 
-                            // 更新会话
-                            session.setMessageCount(session.getMessageCount() + 1);
-                            session.setLastMessageContent(aiContent);
-                            session.setLastMessageTime(LocalDateTime.now());
-                            if (session.getStartedAt() != null) {
-                                session.setDurationMinutes((int) Duration.between(
-                                        session.getStartedAt(), LocalDateTime.now()).toMinutes());
-                            }
-                            sessionMapper.updateById(session);
-                        }
-
-                        emitter.send(SseEmitter.event().name("done").data("{\"code\":\"200\"}"));
-                        emitter.complete();
-                    } catch (Exception e) {
-                        log.error("SSE complete error", e);
-                    }
-                })
-                .doOnError(e -> {
-                    log.error("SSE stream error for session {}: {}", sessionId, e.getMessage());
-                    try {
-                        emitter.send(SseEmitter.event().name("error")
-                                .data("{\"code\":\"500\",\"message\":\"AI回复失败，请稍后重试\"}"));
-                        emitter.complete();
-                    } catch (Exception ex) {
-                        emitter.completeWithError(ex);
-                    }
-                })
-                .subscribe();
-
+        attachToTurn(sessionId, turnRequestId,
+                lastEventId == null ? 0L : Math.max(0L, lastEventId), emitter);
         return emitter;
     }
 
+    private void attachToTurn(Long sessionId, String requestId, Long lastEventId, SseEmitter emitter) {
+        AtomicLong cursor = new AtomicLong(lastEventId);
+        chatTurnStore.failIfStale(sessionId, requestId);
+        try {
+            if (sendEventsAndCheckTerminal(sessionId, requestId, cursor, emitter)) {
+                emitter.complete();
+                return;
+            }
+        } catch (IOException error) {
+            emitter.completeWithError(error);
+            return;
+        }
+
+        Disposable subscription = Flux.interval(Duration.ofMillis(200), Duration.ofMillis(200))
+                .concatMap(tick -> {
+                    try {
+                        return Mono.just(sendEventsAndCheckTerminal(sessionId, requestId, cursor, emitter));
+                    } catch (IOException error) {
+                        return Mono.error(error);
+                    }
+                })
+                .takeUntil(Boolean::booleanValue)
+                .subscribe(ignored -> { }, error -> emitter.completeWithError(error), emitter::complete);
+        emitter.onCompletion(subscription::dispose);
+        emitter.onTimeout(subscription::dispose);
+    }
+
+    private boolean sendEventsAndCheckTerminal(Long sessionId, String requestId,
+                                               AtomicLong cursor, SseEmitter emitter) throws IOException {
+        List<ConsultationStreamEvent> events = streamEventMapper.selectAfter(
+                sessionId, requestId, cursor.get());
+        for (ConsultationStreamEvent event : events) {
+            emitter.send(SseEmitter.event()
+                    .id(String.valueOf(event.getId()))
+                    .name(event.getEventType())
+                    .data(event.getPayload()));
+            cursor.set(event.getId());
+        }
+
+        ConsultationChatTurn turn = chatTurnMapper.selectOne(
+                new LambdaQueryWrapper<ConsultationChatTurn>()
+                        .eq(ConsultationChatTurn::getSessionId, sessionId)
+                        .eq(ConsultationChatTurn::getClientRequestId, requestId)
+                        .last("LIMIT 1"));
+        return turn != null && !"RUNNING".equals(turn.getStatus());
+    }
+
+    private String messagePayload(String chunk) {
+        return json(Map.of("code", "200", "data", Map.of("content", chunk)));
+    }
+
+    private Map<String, Object> buildAgentContext(Long userId) {
+        AgentMemorySettings settings = agentMemorySettingsMapper.selectById(userId);
+        boolean personalizationEnabled = settings != null
+                && Boolean.TRUE.equals(settings.getPersonalizationEnabled());
+        List<EmotionDiary> diaries = personalizationEnabled
+                ? diaryMapper.selectList(new LambdaQueryWrapper<EmotionDiary>()
+                        .eq(EmotionDiary::getUserId, userId)
+                        .ge(EmotionDiary::getDiaryDate, LocalDate.now().minusDays(89))
+                        .orderByDesc(EmotionDiary::getDiaryDate)
+                        .last("LIMIT 30"))
+                : List.of();
+        List<Map<String, Object>> history = diaries.stream().map(diary -> {
+            Map<String, Object> item = new java.util.LinkedHashMap<>();
+            item.put("diaryDate", diary.getDiaryDate() == null ? null : diary.getDiaryDate().toString());
+            item.put("dominantEmotion", diary.getDominantEmotion());
+            item.put("moodScore", diary.getMoodScore());
+            item.put("sleepQuality", diary.getSleepQuality());
+            item.put("stressLevel", diary.getStressLevel());
+            return item;
+        }).collect(Collectors.toList());
+        List<Map<String, Object>> memories = personalizationEnabled
+                ? agentMemoryMapper.selectList(new LambdaQueryWrapper<AgentMemory>()
+                        .eq(AgentMemory::getUserId, userId)
+                        .and(wrapper -> wrapper.isNull(AgentMemory::getExpiresAt)
+                                .or().ge(AgentMemory::getExpiresAt, LocalDate.now()))
+                        .orderByDesc(AgentMemory::getUpdatedAt)
+                        .last("LIMIT 20"))
+                        .stream().map(memory -> {
+                            Map<String, Object> item = new java.util.LinkedHashMap<>();
+                            item.put("content", memory.getContent());
+                            item.put("source", "用户主动添加");
+                            item.put("updatedAt", memory.getUpdatedAt() == null ? null : memory.getUpdatedAt().toString());
+                            item.put("expiresAt", memory.getExpiresAt() == null ? null : memory.getExpiresAt().toString());
+                            return item;
+                        }).collect(Collectors.toList())
+                : List.of();
+        return Map.of("asOfDate", LocalDate.now().toString(),
+                "emotionHistory", history,
+                "approvedMemories", memories,
+                "personalizationEnabled", personalizationEnabled);
+    }
+
+    private String donePayload() {
+        return json(Map.of("code", "200", "data", Map.of("done", true)));
+    }
+
+    private String errorPayload() {
+        return json(Map.of("code", "500", "message", "AI回复失败，请稍后重试"));
+    }
+
+    private String json(Map<String, Object> payload) {
+        try {
+            return objectMapper.writeValueAsString(payload);
+        } catch (JsonProcessingException error) {
+            throw new IllegalStateException("Unable to serialize stream event", error);
+        }
+    }
+
+    private String sha256(String content) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(content.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException error) {
+            throw new IllegalStateException("SHA-256 is unavailable", error);
+        }
+    }
+
     @Override
-    public Map<String, Object> getSessionEmotion(Long sessionId) {
+    public Map<String, Object> getSessionEmotion(Long sessionId, Long userId, Integer userType) {
+        ConsultationSession session = requireReadableSession(sessionId, userId, userType);
+        recordReviewRead(session, userId, "READ_EMOTION");
         List<ConsultationMessage> messages = messageMapper.selectList(
                 new LambdaQueryWrapper<ConsultationMessage>()
                         .eq(ConsultationMessage::getSessionId, sessionId)
                         .orderByAsc(ConsultationMessage::getCreatedAt));
-        return chatAgent.analyzeEmotion(sessionId, messages);
+        return chatAgent.analyzeEmotion(sessionId, messages, session.getUserId());
     }
 
-    private String escapeJson(String s) {
-        return s.replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r")
-                .replace("\t", "\\t");
+    @Override
+    @Transactional
+    public void updateReviewConsent(Long sessionId, Long userId, Boolean allowed) {
+        ConsultationSession session = sessionMapper.selectByIdForUpdate(sessionId);
+        if (session == null) {
+            throw new BusinessException("会话不存在");
+        }
+        if (userId == null || !userId.equals(session.getUserId())) {
+            throw new BusinessException("403", "仅会话所有者可管理复核授权");
+        }
+
+        boolean nextConsent = Boolean.TRUE.equals(allowed);
+        boolean previousConsent = Boolean.TRUE.equals(session.getReviewConsent());
+        if (previousConsent == nextConsent) {
+            return;
+        }
+
+        session.setReviewConsent(nextConsent);
+        session.setReviewConsentUpdatedAt(LocalDateTime.now());
+        sessionMapper.updateById(session);
+
+        ConsultationReviewAudit audit = new ConsultationReviewAudit();
+        audit.setSessionId(sessionId);
+        audit.setActorUserId(userId);
+        audit.setAction(nextConsent ? "CONSENT_GRANTED" : "CONSENT_REVOKED");
+        reviewAuditMapper.insert(audit);
+
+        if (!nextConsent && ("PENDING".equals(session.getReviewStatus())
+                || "IN_PROGRESS".equals(session.getReviewStatus()))) {
+            String previousStatus = session.getReviewStatus();
+            session.setReviewStatus("CANCELLED");
+            session.setReviewAssigneeId(null);
+            session.setReviewVersion((session.getReviewVersion() == null ? 0 : session.getReviewVersion()) + 1);
+            session.setReviewUpdatedAt(LocalDateTime.now());
+            sessionMapper.updateById(session);
+            recordReviewTransition(sessionId, userId, "REVIEW_CANCELLED", previousStatus, "CANCELLED");
+        }
     }
+
+    @Override
+    @Transactional
+    public void requestReview(Long sessionId, Long userId) {
+        ConsultationSession session = sessionMapper.selectByIdForUpdate(sessionId);
+        if (session == null) {
+            throw new BusinessException("会话不存在");
+        }
+        if (userId == null || !userId.equals(session.getUserId())) {
+            throw new BusinessException("403", "仅会话所有者可申请人工复核");
+        }
+        if (!Boolean.TRUE.equals(session.getReviewConsent())) {
+            throw new BusinessException("409", "请先开启人工复核授权");
+        }
+        String previousStatus = session.getReviewStatus() == null ? "NONE" : session.getReviewStatus();
+        if ("PENDING".equals(previousStatus) || "IN_PROGRESS".equals(previousStatus)) {
+            return;
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        session.setReviewStatus("PENDING");
+        session.setReviewAssigneeId(null);
+        session.setReviewVersion((session.getReviewVersion() == null ? 0 : session.getReviewVersion()) + 1);
+        session.setReviewRequestedAt(now);
+        session.setReviewUpdatedAt(now);
+        sessionMapper.updateById(session);
+        recordReviewTransition(sessionId, userId, "REVIEW_REQUESTED", previousStatus, "PENDING");
+    }
+
+    @Override
+    @Transactional
+    public void updateReviewState(Long sessionId, Long actorUserId, Integer actorUserType,
+                                  ReviewStateRequest request) {
+        if (actorUserId == null || !Integer.valueOf(2).equals(actorUserType)) {
+            throw new BusinessException("403", "仅授权复核人员可更新复核状态");
+        }
+        ConsultationSession session = sessionMapper.selectByIdForUpdate(sessionId);
+        if (session == null) {
+            throw new BusinessException("会话不存在");
+        }
+        if (!Boolean.TRUE.equals(session.getReviewConsent())) {
+            throw new BusinessException("403", "用户已撤回人工复核授权");
+        }
+
+        int currentVersion = session.getReviewVersion() == null ? 0 : session.getReviewVersion();
+        if (request.getExpectedVersion() != currentVersion) {
+            throw new BusinessException("409", "复核状态已被其他人员更新，请刷新后重试");
+        }
+
+        String fromStatus = session.getReviewStatus() == null ? "NONE" : session.getReviewStatus();
+        String target = request.getTargetStatus().trim().toUpperCase();
+        String action;
+        if ("PENDING".equals(fromStatus) && "IN_PROGRESS".equals(target)) {
+            session.setReviewAssigneeId(actorUserId);
+            action = "REVIEW_CLAIMED";
+        } else if ("IN_PROGRESS".equals(fromStatus) && "RESOLVED".equals(target)) {
+            if (!actorUserId.equals(session.getReviewAssigneeId())) {
+                throw new BusinessException("403", "只有当前负责人可以完成复核");
+            }
+            action = "REVIEW_RESOLVED";
+        } else if ("IN_PROGRESS".equals(fromStatus) && "PENDING".equals(target)) {
+            if (!actorUserId.equals(session.getReviewAssigneeId())) {
+                throw new BusinessException("403", "只有当前负责人可以释放复核事项");
+            }
+            session.setReviewAssigneeId(null);
+            action = "REVIEW_RELEASED";
+        } else {
+            throw new BusinessException("409", "不允许的复核状态迁移");
+        }
+
+        session.setReviewStatus(target);
+        session.setReviewVersion(currentVersion + 1);
+        session.setReviewUpdatedAt(LocalDateTime.now());
+        sessionMapper.updateById(session);
+        recordReviewTransition(sessionId, actorUserId, action, fromStatus, target);
+    }
+
+    private void recordReviewTransition(Long sessionId, Long actorUserId,
+                                        String action, String fromStatus, String toStatus) {
+        ConsultationReviewAudit audit = new ConsultationReviewAudit();
+        audit.setSessionId(sessionId);
+        audit.setActorUserId(actorUserId);
+        audit.setAction(action);
+        audit.setFromStatus(fromStatus);
+        audit.setToStatus(toStatus);
+        reviewAuditMapper.insert(audit);
+    }
+
+    private ConsultationSession requireReadableSession(Long sessionId, Long userId, Integer userType) {
+        ConsultationSession session = sessionMapper.selectById(sessionId);
+        if (session == null) {
+            throw new BusinessException("会话不存在");
+        }
+
+        boolean isOwner = userId != null && userId.equals(session.getUserId());
+        boolean isReviewer = Integer.valueOf(2).equals(userType)
+                && Boolean.TRUE.equals(session.getReviewConsent());
+        boolean reviewInProgress = "PENDING".equals(session.getReviewStatus())
+                || "IN_PROGRESS".equals(session.getReviewStatus())
+                || "RESOLVED".equals(session.getReviewStatus());
+        if (!isOwner && !(isReviewer && reviewInProgress)) {
+            throw new BusinessException("403", "无权访问该会话");
+        }
+        return session;
+    }
+
+    private void recordReviewRead(ConsultationSession session, Long actorUserId, String action) {
+        if (actorUserId == null || actorUserId.equals(session.getUserId())) {
+            return;
+        }
+        ConsultationReviewAudit audit = new ConsultationReviewAudit();
+        audit.setSessionId(session.getId());
+        audit.setActorUserId(actorUserId);
+        audit.setAction(action);
+        reviewAuditMapper.insert(audit);
+    }
+
 }

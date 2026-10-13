@@ -2,7 +2,9 @@
 from langchain_core.messages import HumanMessage, SystemMessage
 
 import config
+import hashlib
 from prompts.diary_prompt import DIARY_SYSTEM_PROMPT, DIARY_USER_TEMPLATE
+from services.llm_governance import llm_call_governor
 
 
 class DiaryService:
@@ -15,6 +17,8 @@ class DiaryService:
             base_url=config.DEEPSEEK_BASE_URL,
             temperature=0.6,
             max_tokens=512,
+            timeout=config.LLM_REQUEST_TIMEOUT_SECONDS,
+            max_retries=1,
         )
 
     async def analyze_diary(self, diary_data: dict) -> str:
@@ -37,10 +41,16 @@ class DiaryService:
         ]
 
         try:
-            response = await self.llm.ainvoke(messages)
+            response = await llm_call_governor.invoke(
+                self.llm,
+                messages,
+                "diary-analysis",
+                request_context={"userId": diary_data.get("userId")},
+                prompt_version=hashlib.sha256(DIARY_SYSTEM_PROMPT.encode("utf-8")).hexdigest()[:12],
+            )
             return response.content.strip() if response.content else ""
-        except Exception as e:
-            return f"[AI分析生成失败: {str(e)}]"
+        except Exception:
+            return "[AI分析生成失败: 暂时无法连接分析服务]"
 
 
 # Singleton

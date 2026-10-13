@@ -144,6 +144,7 @@
 							</el-descriptions-item>
 							<el-descriptions-item label="情绪强度">
 								<el-progress
+									v-if="typeof aiData.emotionScore === 'number'"
 									:percentage="aiData.emotionScore"
 									:color="
 										getEmotionScoreColor(
@@ -151,27 +152,18 @@
 										)
 									"
 									:stroke-width="8" />
+								<span v-else>暂不可判断</span>
 							</el-descriptions-item>
 							<el-descriptions-item label="风险等级">
 								<el-tag
-									:type="
-										getRiskLevelTagType(
-											aiData.riskLevel as 0 | 1 | 2 | 3,
-										)
-									"
-									>{{ aiData.riskLevel }}</el-tag
+									:type="aiData.riskLevel == null ? 'info' : getRiskLevelTagType(aiData.riskLevel as 0 | 1 | 2 | 3)"
+									>{{ aiData.riskLevel == null ? '未知' : aiData.riskLevel }}</el-tag
 								>
 							</el-descriptions-item>
 							<el-descriptions-item label="情绪性质">
 								<el-tag
-									:type="
-										aiData.isNegative ? 'danger' : 'success'
-									">
-									{{
-										aiData.isNegative ? '负面情绪' : (
-											'正面情绪'
-										)
-									}}
+									:type="aiData.isNegative == null ? 'info' : aiData.isNegative ? 'danger' : 'success'">
+									{{ aiData.isNegative == null ? '未能判断' : aiData.isNegative ? '负面情绪' : '正面情绪' }}
 								</el-tag>
 							</el-descriptions-item>
 						</el-descriptions>
@@ -319,7 +311,7 @@ const handleSearch = async (formData?: SearchFormData) => {
 
 const detailDialogVisible = ref<boolean>(false)
 const currentDetail = ref<EmotionLogItem | null>(null)
-const aiData = ref<Record<string, string | number>>({})
+const aiData = ref<Record<string, unknown>>({})
 const viewSessionDetail = (row: EmotionLogItem) => {
 	currentDetail.value = row
 	detailDialogVisible.value = true

@@ -20,7 +20,8 @@ public interface ChatAgent {
      * @return 流式返回的文本片段
      */
     Flux<String> streamResponse(Long sessionId, String userMessage,
-                                List<ConsultationMessage> history);
+                                List<ConsultationMessage> history,
+                                Map<String, Object> context);
 
     /**
      * 分析会话中的情绪状态
@@ -28,5 +29,9 @@ public interface ChatAgent {
      * @param messages 会话消息列表
      * @return 情绪分析结果
      */
-    Map<String, Object> analyzeEmotion(Long sessionId, List<ConsultationMessage> messages);
+    Map<String, Object> analyzeEmotion(Long sessionId, List<ConsultationMessage> messages, Long userId);
+
+    default void purgeSessionState(Long sessionId) {
+        // Mock agents have no durable session state to clear.
+    }
 }

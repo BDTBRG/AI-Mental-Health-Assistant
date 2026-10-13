@@ -9,8 +9,9 @@ import java.util.List;
 
 public interface EmotionDiaryService {
     void submitDiary(EmotionDiaryRequest request, Long userId);
-    PageResult<EmotionDiaryVO> getAdminPage(EmotionDiaryPageQuery query);
-    void deleteAdmin(Long id);
+    PageResult<EmotionDiaryVO> getAdminPage(EmotionDiaryPageQuery query, Long actorUserId);
+    void deleteAdmin(Long id, Long actorUserId);
+    void deleteOwnDiary(Long id, Long ownerUserId);
 
     /**
      * 获取用户日记列表（带AI分析结果）

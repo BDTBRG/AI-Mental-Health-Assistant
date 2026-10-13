@@ -1,233 +1,142 @@
-# AI Mental Health Assistant (AMHA)
+# AI Mental Health Assistant
 
-AI 心理健康助手 —— 基于 Vue 3 + Spring Boot + FastAPI 的全栈心理健康服务平台，提供 AI 心理咨询、情绪日记、心理健康知识库等功能，并配备后台数据管理面板。
+面向心理健康支持场景的全栈 AI 应用，提供持续对话、情绪日记、可信知识检索，以及用户授权后的人工复核工作流。项目用于展示 AI 应用全栈工程能力；产品定位是日常支持，不提供诊断或治疗判断，也不代表已接入真实临床服务。
 
-## 功能概览
+## 产品能力
 
 ### 用户端
-- **AI 心理咨询** —— 与 AI 心理助手实时对话，获得情绪支持与建议（SSE 流式响应，集成 DeepSeek LLM）
-- **情绪日记** —— 记录每日情绪状态，AI 自动分析情绪并提供个性化建议
-- **心理健康知识库** —— 浏览、搜索心理学普及文章
-- **用户认证** —— 注册、登录与个人信息管理
+
+- SSE 流式对话，支持请求幂等、事件游标续传和断线重连。
+- 会话消息按窗口加载，长会话可继续回看更早记录。
+- 情绪日记和趋势视图区分用户自评与 AI 分析；缺失日期保持为空档。
+- 用户可主动申请人工复核，并可撤回授权。
+- 个性化记忆默认关闭；用户可查看、纠正、设定有效期或删除记忆。
+- 用户可删除自己的日记，未完成的分析任务也会被移除。
 
 ### 管理端
-- **数据仪表盘** —— 用户活跃度、情绪趋势、咨询统计等可视化分析
-- **知识文章管理** —— 文章的增删改查、分类管理、状态控制
-- **咨询记录管理** —— 查看所有用户咨询会话与消息详情
-- **情感分析管理** —— 查看用户情绪日记与 AI 分析结果
 
-## 项目架构
+- 只展示用户明确申请复核且授权的会话。
+- 支持领取、完成和释放复核任务；状态更新带版本校验并写入操作审计。
+- 情绪日记管理接口限定管理员访问，并记录读取和删除审计。
 
-```
-AI Mental Health Assistant/
-├── src/                     # 前端源码 (Vue 3 + TypeScript)
-│   ├── api/                 # API 接口层 (Axios)
-│   ├── assets/              # 静态资源
-│   ├── components/          # 公共组件
-│   ├── config/              # 配置文件
-│   ├── layouts/             # 布局组件
-│   ├── router/              # 路由配置
-│   ├── stores/              # Pinia 状态管理
-│   ├── styles/              # 全局样式 (SCSS)
-│   ├── types/               # TypeScript 类型定义
-│   ├── utils/               # 工具函数
-│   └── views/               # 页面视图
-├── server/                  # 后端源码 (Spring Boot 3 + JDK 17)
-│   ├── pom.xml              # Maven 配置
-│   └── src/main/java/com/amha/
-│       ├── agent/           # AI Agent 接口层 (调用 Python Agent)
-│       ├── common/          # 公共类 (Result、异常处理)
-│       ├── config/          # 配置 (JWT、Web、数据初始化)
-│       ├── controller/      # REST 控制器
-│       ├── dto/             # 数据传输对象
-│       ├── entity/          # 数据库实体
-│       ├── interceptor/     # JWT 拦截器
-│       ├── mapper/          # MyBatis-Plus Mapper
-│       └── service/         # 业务服务层
-├── agent/                   # AI Agent 服务 (Python FastAPI)
-│   ├── app.py               # FastAPI 入口
-│   ├── config.py            # 配置 (DeepSeek API)
-│   ├── prompts/             # LLM 提示词模板
-│   ├── services/            # 业务服务 (Chat/Emotion/Diary)
-│   └── requirements.txt     # Python 依赖
-├── vite.config.ts
-└── README.md
-```
+## 架构与工程机制
+
+    Vue 3 / TypeScript
+          │ REST + SSE（Last-Event-ID）
+          ▼
+    Spring Boot ── MySQL：会话、事件、审计、Outbox
+          │                    │
+          │ 内部鉴权            └── Redis Streams：日记分析 / 知识索引异步任务
+          ▼
+    FastAPI Agent ── LangGraph：按会话持久化流程状态
+          ├── 安全门控与生成后检查
+          ├── 混合 RAG：FAISS 向量召回 + 词项召回 / 重排 / 来源标识
+          ├── 用户主动维护的长期记忆
+          └── LLM 调用治理与脱敏观测
+
+### 前端
+
+- 对话请求使用客户端幂等 ID，服务端事件带序号；重连通过事件 ID 续读。
+- 会话列表只渲染最近消息窗口，用户可以逐批加载较早消息。
+- 复核状态、用户授权、记忆开关和日记趋势分别呈现，避免把 AI 推断混同为用户自评。
+
+### 后端
+
+- 会话消息、流式事件和回合状态写入 MySQL；同一幂等 ID 重放可复用已生成结果，冲突请求被拒绝。
+- 用户、会话归属在读取、删除及流式入口校验；公开注册不能指定管理员角色。
+- 日记分析与知识索引通过事务 Outbox 衔接数据库与 Redis Streams，包含租约、重试和失败状态。
+- 管理工作流采用带版本号的状态迁移，防止多人并发操作覆盖，并记录审计信息。
+- LLM 调用和 Agent 私有 API 分别有调用预算/熔断控制和共享密钥校验。
+
+### Agent
+
+- 风险识别独立于生成提示词；识别或分析失败按“不确定”处理，避免默认回落为低风险。生成后再做安全检查。
+- RAG 使用稠密与词项召回、重排和低置信度拒答，并保留文章/片段标识供回答引用；索引映射按 chunk ID 读取。
+- LangGraph 检查点以会话为隔离键持久化，聊天回合结果缓存以支持重试复用。
+- 长期记忆只采纳用户主动添加的内容，包含来源和有效期；撤回或变更会在数据库事务中写入检查点清理 Outbox，由 Worker 持续退避重试，直到 Agent 确认完成。
+- 知识下架、删除和索引更新由版本化 Outbox 传播；失败任务带错误码与尝试次数，并持续退避重试，避免索引长期保留旧版本。
+- 调用层记录模型、提示词摘要、索引版本、阶段耗时和 Token 用量，并实施超时、并发上限、熔断及进程内用户配额。
 
 ## 技术栈
 
-### 前端
-| 类别       | 技术                   |
-| ---------- | ---------------------- |
-| 框架       | Vue 3 + TypeScript     |
-| 构建工具   | Vite 8                 |
-| UI 组件库  | Element Plus           |
-| 状态管理   | Pinia                  |
-| 路由       | Vue Router 4           |
-| 图表       | ECharts 6              |
-| HTTP 请求  | Axios                  |
-| 富文本编辑 | WangEditor 5           |
-| 样式       | SCSS                   |
+| 端 | 技术 |
+| --- | --- |
+| 前端 | Vue 3、TypeScript、Vite、Element Plus、Pinia、Vue Router、ECharts、Axios |
+| 后端 | Java 17、Spring Boot 3、MyBatis-Plus、MySQL 8、Redis 7、JWT、WebFlux、SSE |
+| Agent | Python、FastAPI、LangChain OpenAI 兼容接口、LangGraph、FAISS、Sentence Transformers、SQLite checkpoint |
+| 验证 | JUnit 5、MockMvc、H2、Vue TypeScript 构建、Python compileall / pytest |
 
-### 后端
-| 类别     | 技术                            |
-| -------- | ------------------------------- |
-| 框架     | Spring Boot 3.3.5 + JDK 17      |
-| ORM      | MyBatis-Plus 3.5.7              |
-| 数据库   | MySQL 8.0                       |
-| 缓存     | Redis                           |
-| 认证     | JWT (jjwt) + BCrypt             |
-| 流式对话 | SSE (SseEmitter) + WebFlux      |
-| 测试     | JUnit 5 + MockMvc + H2          |
+## 本地运行
 
-### AI Agent
-| 类别     | 技术                              |
-| -------- | --------------------------------- |
-| 框架     | FastAPI + Uvicorn                 |
-| LLM      | DeepSeek (via LangChain-OpenAI)   |
-| 流式输出 | JSON Lines (NDJSON)               |
-| 功能     | 对话生成、情绪分析、日记分析      |
+### 环境要求
 
-## 环境要求
-
-- Node.js >= 18（推荐 v24）
-- pnpm（推荐）或 npm
-- JDK 17
-- Maven 3.9+
-- MySQL 8.0
-- Redis 7
-- Python 3.10+（运行 AI Agent）
-
-## 快速开始
+- Node.js 18+、pnpm（或 npm）
+- JDK 17、Maven 3.9+
+- MySQL 8、Redis 7
+- Python 3.10+
 
 ### 1. 初始化数据库
 
-```bash
-mysql -u root -p < server/src/main/resources/db/init.sql
-```
+新库执行：
 
-### 2. 配置 AI Agent
+    mysql -u root -p < server/src/main/resources/db/init.sql
 
-```bash
-cd agent
-cp .env.example .env
-# 编辑 .env 填入你的 DeepSeek API Key
-pip install -r requirements.txt
-python app.py
-```
+已有数据库按顺序应用 upgrade_v2 至 upgrade_v10 的脚本；先备份并核对当前 schema。升级脚本没有在本任务中应用到生产数据库。
 
-Agent 运行在 `http://localhost:5000`。
+### 2. 启动 Agent
+
+    cd agent
+    cp .env.example .env
+    # 在 .env 中设置 DeepSeek API Key 和随机生成的 AGENT_INTERNAL_TOKEN
+    python -m venv .venv
+    # 按操作系统激活 .venv
+    pip install -r requirements.txt
+    python app.py
+
+Agent 默认监听 http://localhost:5000。私有接口要求 X-Agent-Token；缺少密钥会失败关闭。
 
 ### 3. 启动后端
 
-```bash
-cd server
-mvn spring-boot:run
-```
+将与 Agent .env 中完全相同的 AGENT_INTERNAL_TOKEN 提供给 Spring Boot 进程：
 
-后端运行在 `http://localhost:8080`。首次启动会自动初始化管理员账号（admin/admin123）和测试数据。
+    cd server
+    export AGENT_INTERNAL_TOKEN='your-long-random-secret'
+    mvn spring-boot:run
+
+PowerShell 示例：
+
+    $env:AGENT_INTERNAL_TOKEN = 'your-long-random-secret'
+    mvn spring-boot:run
+
+后端默认监听 http://localhost:8080。仅在空数据库初始化时创建演示管理员 admin/admin123 和演示数据；部署前应替换演示凭据。
 
 ### 4. 启动前端
 
-```bash
-pnpm install
-pnpm dev
-```
+    pnpm install
+    pnpm dev
 
-前端运行在 `http://localhost:5173`，Vite 代理将 `/api` 请求转发至后端。
+前端默认监听 http://localhost:5173，Vite 将 /api 转发到后端。
 
-### 5. 登录
+## 数据与安全边界
 
-| 角色     | 用户名    | 密码      |
-| -------- | --------- | --------- |
-| 管理员   | admin     | admin123  |
-| 普通用户 | testuser  | test123   |
+- 只在用户明确授权并主动申请后进入人工复核队列；复核工作台是演示工作流。
+- 情绪分析和对话内容仅用于支持体验，不应当作医学诊断或治疗建议。
+- 数据库升级脚本需按版本顺序人工核验；本文档不代表生产迁移已经执行。
+- 调用配额与熔断状态在当前实现中是进程内状态，多实例环境需改为共享限流和统一成本账本。
+- Agent 测试需要先安装依赖；测试环境若缺少 pytest，python -m pytest 不可运行。
+- 没有真实服务流量和固定基准测试数据时，不对延迟提升、准确率、成本节省或恢复率作量化承诺。
 
-## 后端 API 接口
+## 验证命令
 
-### 用户模块
-| 方法   | 路径          | 说明   |
-| ------ | ------------- | ------ |
-| POST   | /user/login   | 登录   |
-| POST   | /user/add     | 注册   |
-| POST   | /user/logout  | 登出   |
+    # Spring Boot 后端测试
+    cd server
+    mvn test
 
-### 知识库模块
-| 方法   | 路径                           | 说明         |
-| ------ | ------------------------------ | ------------ |
-| GET    | /knowledge/category/tree       | 分类树       |
-| GET    | /knowledge/article/page        | 文章分页查询 |
-| POST   | /knowledge/article             | 创建文章     |
-| GET    | /knowledge/article/{id}        | 文章详情     |
-| PUT    | /knowledge/article/{id}        | 更新文章     |
-| PUT    | /knowledge/article/{id}/status | 修改状态     |
-| DELETE | /knowledge/article/{id}        | 删除文章     |
+    # 前端 TypeScript 检查（在项目根目录）
+    pnpm exec vue-tsc -b
 
-### 文件模块
-| 方法 | 路径          | 说明     |
-| ---- | ------------- | -------- |
-| POST | /file/upload  | 文件上传 |
+    # Agent 语法检查（在项目根目录）
+    python -m compileall -q agent
 
-### 情绪日记模块
-| 方法   | 路径                      | 说明             |
-| ------ | ------------------------- | ---------------- |
-| POST   | /emotion-diary            | 提交情绪日记     |
-| GET    | /emotion-diary/admin/page | 管理员分页查询   |
-| DELETE | /emotion-diary/admin/{id} | 管理员删除日记   |
-
-### 心理咨询模块
-| 方法   | 路径                                      | 说明              |
-| ------ | ----------------------------------------- | ----------------- |
-| POST   | /psychological-chat/session/start         | 创建咨询会话      |
-| GET    | /psychological-chat/sessions              | 会话列表          |
-| DELETE | /psychological-chat/sessions/{id}         | 删除会话          |
-| GET    | /psychological-chat/sessions/{id}/messages| 获取会话消息      |
-| POST   | /psychological-chat/stream                | SSE 流式对话      |
-| GET    | /psychological-chat/session/{id}/emotion  | 获取情绪分析      |
-
-### 数据分析模块
-| 方法 | 路径                       | 说明             |
-| ---- | -------------------------- | ---------------- |
-| GET  | /data-analytics/overview   | 仪表盘综合数据   |
-
-## API 响应格式
-
-```json
-{
-  "code": "200",
-  "msg": "操作成功",
-  "data": {}
-}
-```
-
-| code  | 含义           |
-| ----- | -------------- |
-| "200" | 成功           |
-| "-1"  | 登录过期/未登录 |
-| "500" | 业务异常       |
-
-## 角色说明
-
-| 角色     | userType | 权限                         |
-| -------- | -------- | ---------------------------- |
-| 普通用户 | 1        | 访问用户端功能               |
-| 管理员   | 2        | 访问管理端面板，管理内容与数据 |
-
-## AI Agent 架构
-
-Java 后端通过 `ChatAgent` 接口（`server/src/main/java/com/amha/agent/`）调用 Python Agent 服务。`RealChatAgent` 通过 WebFlux HTTP 调用 FastAPI 端点：
-
-- `/api/agent/chat` — 流式对话（JSON Lines 格式，Java 端解析后转为 SSE 推送给前端）
-- `/api/agent/emotion/analyze` — 情绪分析
-- `/api/agent/diary/analyze` — 日记 AI 分析
-
-Python Agent 使用 LangChain 调用 DeepSeek LLM，支持流式输出和结构化分析结果。
-
-## 测试
-
-```bash
-cd server
-mvn test
-```
-
-共 128 个测试用例，覆盖用户认证、知识库 CRUD、情绪日记、SSE 流式对话、数据分析等全部模块。
+    # Agent 测试（安装 requirements 后）
+    python -m pytest -q agent/tests

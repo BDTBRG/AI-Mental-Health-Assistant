@@ -41,22 +41,9 @@ class KnowledgeControllerTest {
     @BeforeEach
     void setUp() throws Exception {
         if (token == null) {
-            // 注册并登录
-            RegisterRequest regReq = new RegisterRequest();
-            regReq.setUsername("knowtest");
-            regReq.setPassword("test123");
-            regReq.setConfirmPassword("test123");
-            regReq.setEmail("knowtest@test.com");
-            regReq.setGender(1);
-            regReq.setUserType(2);
-
-            mockMvc.perform(post("/user/add")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .content(objectMapper.writeValueAsString(regReq)));
-
             LoginRequest loginReq = new LoginRequest();
-            loginReq.setUsername("knowtest");
-            loginReq.setPassword("test123");
+            loginReq.setUsername("admin");
+            loginReq.setPassword("admin123");
 
             String resp = mockMvc.perform(post("/user/login")
                             .contentType(MediaType.APPLICATION_JSON)
@@ -151,6 +138,22 @@ class KnowledgeControllerTest {
     }
 
     @Test
+    @Order(4)
+    @DisplayName("未登录用户可读取文章详情")
+    void testPublicArticleDetailDoesNotRequireLogin() throws Exception {
+        Assertions.assertNotNull(articleId, "文章ID不能为空");
+        mockMvc.perform(get("/knowledge/article/" + articleId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(org.hamcrest.Matchers.not("200")));
+        mockMvc.perform(get("/knowledge/article/page")
+                        .param("status", "0")
+                        .param("currentPage", "1")
+                        .param("pageSize", "100"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.records[?(@.id == " + articleId + ")]").isEmpty());
+    }
+
+    @Test
     @Order(5)
     @DisplayName("更新文章")
     void testUpdateArticle() throws Exception {
@@ -184,6 +187,9 @@ class KnowledgeControllerTest {
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value("200"));
+        mockMvc.perform(get("/knowledge/article/" + articleId))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("200"));
     }
 
     @Test
@@ -213,5 +219,16 @@ class KnowledgeControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value("200"))
                 .andExpect(jsonPath("$.data.filePath").isNotEmpty());
+    }
+
+    @Test
+    @Order(9)
+    @DisplayName("未登录用户不能修改知识文章")
+    void testArticleWriteRequiresAuthentication() throws Exception {
+        mockMvc.perform(put("/knowledge/article/1")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("-1"));
     }
 }

@@ -31,20 +31,9 @@ class DataAnalyticsControllerTest {
     @BeforeEach
     void setUp() throws Exception {
         if (token == null) {
-            RegisterRequest regReq = new RegisterRequest();
-            regReq.setUsername("analyticsadmin");
-            regReq.setPassword("test123");
-            regReq.setConfirmPassword("test123");
-            regReq.setEmail("analytics@test.com");
-            regReq.setGender(1);
-            regReq.setUserType(2);
-            mockMvc.perform(post("/user/add")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .content(objectMapper.writeValueAsString(regReq)));
-
             LoginRequest loginReq = new LoginRequest();
-            loginReq.setUsername("analyticsadmin");
-            loginReq.setPassword("test123");
+            loginReq.setUsername("admin");
+            loginReq.setPassword("admin123");
             String resp = mockMvc.perform(post("/user/login")
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(objectMapper.writeValueAsString(loginReq)))
