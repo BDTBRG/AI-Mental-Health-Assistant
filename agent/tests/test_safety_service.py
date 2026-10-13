@@ -24,3 +24,31 @@ def test_unsafe_generated_instructions_are_replaced():
 
     assert blocked is True
     assert "不能帮助提供" in response
+
+
+def test_affirmative_answer_to_pending_risk_question_is_high():
+    result = SafetyService().assess_clarification("有")
+
+    assert result.level == "high"
+    assert result.reason == "affirmative_risk_confirmation"
+
+
+def test_ambiguous_answer_to_pending_risk_question_stays_uncertain():
+    result = SafetyService().assess_clarification("我不知道")
+
+    assert result.level == "uncertain"
+    assert result.reason == "ambiguous_clarification_answer"
+
+
+def test_explicit_denial_resolves_pending_risk_question():
+    result = SafetyService().assess_clarification("我没有伤害自己的打算")
+
+    assert result.level == "low"
+    assert result.reason == "explicit_risk_denial"
+
+
+def test_safe_location_answer_does_not_clear_a_previously_high_risk_turn():
+    safety = SafetyService()
+
+    assert safety.assess_clarification("是", "safe_location").level == "uncertain"
+    assert safety.assess_clarification("没有", "safe_location").level == "high"

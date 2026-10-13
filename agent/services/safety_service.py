@@ -34,6 +34,27 @@ class SafetyService:
         re.compile(r"(?:建议|推荐|可以).{0,16}(?:停药|加量|减量|换药)"),
         re.compile(r"(?:你患有|诊断为|你就是).{0,12}(?:抑郁症|焦虑症|双相障碍|精神分裂症)"),
     )
+    AFFIRMATIVE_CLARIFICATION_ANSWERS = frozenset({
+        "有", "有的", "是", "是的", "对", "对的", "嗯", "嗯嗯", "已经",
+        "已经采取行动", "已经采取了行动", "已经做了", "采取了行动", "做了",
+    })
+    NEGATIVE_CLARIFICATION_ANSWERS = frozenset({
+        "没有", "没有的", "没有打算", "没有计划", "没有行动", "没有采取行动",
+        "没有做", "还没有", "目前没有", "现在没有", "暂时没有", "没打算",
+        "没计划", "没行动", "没采取行动", "没做", "不是", "否",
+    })
+    EXPLICIT_CLARIFICATION_NEGATION = re.compile(
+        r"^(?:(?:我)?(?:并没有|目前没有|现在没有|暂时没有|没有|没|未|不会))"
+        r".{0,32}(?:打算|计划|行动|采取|伤害自己|伤害别人|自杀|轻生|自残|自伤|引用|回忆)"
+    )
+    AFFIRMATIVE_PREFIX = re.compile(
+        r"^(?:有|是的?|对的?|嗯嗯?|确实|已经|我有)"
+        r"(?:[，,。.!！?？、；;]|$)"
+    )
+    AFFIRMATIVE_RISK_DETAIL = re.compile(
+        r"^(?:有|是的?|对的?|嗯嗯?|确实|已经|我有|我已经).{0,16}"
+        r"(?:打算|计划|行动|采取|伤害自己|伤害别人|自杀|轻生|自残|自伤|想法|念头|做了)"
+    )
 
     def assess(self, text: str) -> SafetyAssessment:
         normalized = re.sub(r"\s+", "", text or "").lower()
@@ -51,6 +72,63 @@ class SafetyService:
             return SafetyAssessment("uncertain", "harm_reference_requires_clarification")
 
         return SafetyAssessment("low", "no_rule_match")
+
+    def assess_clarification(
+        self, text: str, prompt_kind: str = "risk_intent"
+    ) -> SafetyAssessment:
+        """Interpret an answer only while the conversation is awaiting safety clarification."""
+        normalized = re.sub(r"\s+", "", (text or "").lower())
+        compact = re.sub(r"[，,。.!！?？、；;]", "", normalized)
+        if not compact:
+            return SafetyAssessment("uncertain", "ambiguous_clarification_answer")
+
+        assessment = self.assess(text)
+        if assessment.level == "high":
+            return assessment
+
+        if prompt_kind == "safe_location":
+            if compact in self.AFFIRMATIVE_CLARIFICATION_ANSWERS or self.AFFIRMATIVE_PREFIX.search(normalized):
+                return SafetyAssessment("uncertain", "safe_location_confirmed_risk_still_unresolved")
+            if (compact in self.NEGATIVE_CLARIFICATION_ANSWERS
+                    or re.match(r"^(?:不安全|我不安全|没有安全的地方|没有人陪|没人陪)", compact)):
+                return SafetyAssessment("high", "user_reports_unsafe_location")
+            return SafetyAssessment("uncertain", "ambiguous_safe_location_answer")
+
+        if (compact in self.AFFIRMATIVE_CLARIFICATION_ANSWERS
+                or self.AFFIRMATIVE_PREFIX.search(normalized)
+                or self.AFFIRMATIVE_RISK_DETAIL.search(normalized)):
+            return SafetyAssessment("high", "affirmative_risk_confirmation")
+
+        if (compact in self.NEGATIVE_CLARIFICATION_ANSWERS
+                or self.EXPLICIT_CLARIFICATION_NEGATION.search(compact)):
+            return SafetyAssessment("low", "explicit_risk_denial")
+
+        # Answers such as "不知道" and unrelated short replies cannot be treated as
+        # a negative response to a direct safety question.
+        return SafetyAssessment("uncertain", "ambiguous_clarification_answer")
+
+    @staticmethod
+    def is_uncertain_response(text: str) -> bool:
+        """Recognize the exact deterministic prompt used to request risk clarification."""
+        actual = re.sub(r"\s+", "", text or "")
+        expected = re.sub(r"\s+", "", SafetyService.uncertain_response())
+        return actual == expected
+
+    @staticmethod
+    def is_high_risk_followup_response(text: str) -> bool:
+        actual = re.sub(r"\s+", "", text or "")
+        expected = re.sub(r"\s+", "", SafetyService.high_risk_followup_response())
+        return actual == expected
+
+    @staticmethod
+    def pending_clarification_kind(text: str) -> str | None:
+        if SafetyService.is_uncertain_response(text) or SafetyService.is_high_risk_followup_response(text):
+            return "risk_intent"
+        actual = re.sub(r"\s+", "", text or "")
+        expected = re.sub(r"\s+", "", SafetyService.high_risk_response())
+        if actual == expected:
+            return "safe_location"
+        return None
 
     @classmethod
     def _inside_quote(cls, text: str, position: int) -> bool:
@@ -81,6 +159,14 @@ class SafetyService:
         return (
             "我不确定你是在引用、回忆，还是在描述自己现在的处境。"
             "我想先确认：你此刻有没有伤害自己或他人的打算，或者已经采取了行动？"
+        )
+
+    @staticmethod
+    def high_risk_followup_response() -> str:
+        return (
+            "谢谢你告诉我。即使你现在处于安全地点，刚才提到的风险仍需要认真对待。"
+            "请继续和可信任的人待在一起，并尽快联系当地紧急服务。"
+            "你此刻是否仍有伤害自己或他人的打算，或者已经采取了行动？"
         )
 
     @staticmethod

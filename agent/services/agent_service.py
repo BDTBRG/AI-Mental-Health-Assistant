@@ -2,7 +2,7 @@
 
 import logging
 import hashlib
-from typing import Any, AsyncGenerator, Dict, List, TypedDict
+from typing import Any, AsyncGenerator, Dict, List, Literal, TypedDict
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -22,6 +22,7 @@ class AgentState(TypedDict):
     # Replaced with the authoritative Java history at the start of each turn.
     messages: List[Any]
     latest_user_message: str
+    pending_safety_clarification: Literal["risk_intent", "safe_location"] | None
     turn_id: str
     agent_context: Dict[str, Any]
     tool_rounds: int
@@ -101,7 +102,13 @@ class AgentChatService:
         return content if isinstance(content, str) else str(content)
 
     def _safety_gate(self, state: AgentState) -> Dict[str, Any]:
-        assessment = safety_service.assess(state["latest_user_message"])
+        clarification_kind = state.get("pending_safety_clarification")
+        if clarification_kind:
+            assessment = safety_service.assess_clarification(
+                state["latest_user_message"], clarification_kind
+            )
+        else:
+            assessment = safety_service.assess(state["latest_user_message"])
         if assessment.level == "high":
             response = safety_service.high_risk_response()
             return {
@@ -110,7 +117,11 @@ class AgentChatService:
                 "final_text": response,
             }
         if assessment.level == "uncertain":
-            response = safety_service.uncertain_response()
+            response = (
+                safety_service.high_risk_followup_response()
+                if clarification_kind == "safe_location"
+                else safety_service.uncertain_response()
+            )
             return {
                 "messages": state["messages"] + [AIMessage(content=response)],
                 "blocked": True,
@@ -212,10 +223,16 @@ class AgentChatService:
             final_text = snapshot.values["final_text"]
         else:
             initial = self._build_messages(messages)
+            pending_safety_clarification = (
+                safety_service.pending_clarification_kind(self._content(initial[-1]))
+                if initial and isinstance(initial[-1], AIMessage)
+                else None
+            )
             initial.append(HumanMessage(content=user_message))
             state: AgentState = {
                 "messages": initial,
                 "latest_user_message": user_message,
+                "pending_safety_clarification": pending_safety_clarification,
                 "turn_id": turn_id,
                 "agent_context": context,
                 "tool_rounds": 0,
