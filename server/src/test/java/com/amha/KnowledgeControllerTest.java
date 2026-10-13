@@ -208,7 +208,7 @@ class KnowledgeControllerTest {
     @DisplayName("文件上传")
     void testFileUpload() throws Exception {
         MockMultipartFile file = new MockMultipartFile(
-                "file", "test.png", "image/png", "test image content".getBytes());
+                "file", "test.png", "image/png", validPng());
 
         mockMvc.perform(multipart("/file/upload")
                         .file(file)
@@ -219,6 +219,20 @@ class KnowledgeControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value("200"))
                 .andExpect(jsonPath("$.data.filePath").isNotEmpty());
+    }
+
+    private static byte[] validPng() {
+        return new byte[]{
+                (byte) 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+                0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+                0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+                0x08, 0x02, 0x00, 0x00, 0x00, (byte) 0x90, 0x77, 0x53,
+                (byte) 0xde, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41,
+                0x54, 0x78, (byte) 0x9c, 0x63, 0x60, 0x00, 0x02, 0x00,
+                0x00, 0x05, 0x00, 0x01, (byte) 0xa5, (byte) 0xf6, 0x45,
+                0x40, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44,
+                (byte) 0xae, 0x42, 0x60, (byte) 0x82
+        };
     }
 
     @Test

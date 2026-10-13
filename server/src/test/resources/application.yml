@@ -1,4 +1,6 @@
 spring:
+  profiles:
+    active: demo
   datasource:
     driver-class-name: org.h2.Driver
     url: jdbc:h2:mem:amha_test;MODE=MySQL;DB_CLOSE_DELAY=-1;NON_KEYWORDS=USER
@@ -23,10 +25,12 @@ mybatis-plus:
       id-type: auto
 
 jwt:
-  secret: test-secret-key-for-jwt-testing-purposes-only
+  secret: local-test-secret-with-at-least-32-bytes
   expiration: 86400000
 
 file:
   upload:
     path: ./test-uploads
     allowed-extensions: jpg,jpeg,png,gif
+    max-size-bytes: 5242880
+    max-image-pixels: 25000000

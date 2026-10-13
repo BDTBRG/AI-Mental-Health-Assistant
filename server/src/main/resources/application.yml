@@ -15,8 +15,8 @@ spring:
 
   servlet:
     multipart:
-      max-file-size: 10MB
-      max-request-size: 20MB
+      max-file-size: 5MB
+      max-request-size: 6MB
 
 server:
   port: 8080
@@ -24,7 +24,6 @@ server:
 mybatis-plus:
   configuration:
     map-underscore-to-camel-case: true
-    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
   global-config:
     db-config:
       id-type: auto
@@ -33,14 +32,16 @@ mybatis-plus:
       logic-not-delete-value: 0
 
 jwt:
-  secret: ${JWT_SECRET:amha-jwt-secret-key-2026-min-32-chars!!}
+  secret: ${JWT_SECRET:}
   expiration: 86400000
 
 # File upload config
 file:
   upload:
     path: ./uploads
-    allowed-extensions: jpg,jpeg,png,gif,webp,pdf,doc,docx
+    allowed-extensions: jpg,jpeg,png,gif,webp
+    max-size-bytes: 5242880
+    max-image-pixels: 25000000
 
 # Python AI Agent config
 agent:

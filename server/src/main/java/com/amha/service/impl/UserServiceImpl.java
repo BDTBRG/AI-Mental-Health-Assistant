@@ -43,9 +43,9 @@ public class UserServiceImpl implements UserService {
         }
 
         String token = jwtUtil.generateToken(user.getId(), user.getUsername(), user.getUserType());
-        // 缓存token，过期时间比JWT略长
+        // 服务端会话与 JWT 使用相同过期时间，登出时可立即撤销。
         redisTemplate.opsForValue().set("token:" + token, user.getId().toString(),
-                24, TimeUnit.HOURS);
+                jwtUtil.getExpirationMillis(), TimeUnit.MILLISECONDS);
 
         String roleType = user.getUserType() == 2 ? "ADMIN" : "USER";
         UserInfoVO userInfo = buildUserInfoVO(user);

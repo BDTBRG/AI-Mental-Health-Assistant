@@ -1,0 +1,79 @@
+package com.amha.controller;
+
+import com.amha.common.GlobalExceptionHandler;
+import com.amha.entity.FileUpload;
+import com.amha.mapper.FileUploadMapper;
+import com.amha.service.impl.FileServiceImpl;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.springframework.mock.web.MockHttpServletResponse;
+import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.*;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
+
+class FileControllerTest {
+
+    @TempDir
+    Path uploadDirectory;
+
+    private FileUploadMapper fileUploadMapper;
+    private MockMvc mockMvc;
+    private String storedImagePath;
+
+    @BeforeEach
+    void setUp() throws Exception {
+        fileUploadMapper = mock(FileUploadMapper.class);
+        FileServiceImpl fileService = new FileServiceImpl(fileUploadMapper);
+        ReflectionTestUtils.setField(fileService, "uploadPath", uploadDirectory.toString());
+        ReflectionTestUtils.setField(fileService, "allowedExtensions", "png,jpg,jpeg,gif,webp");
+
+        storedImagePath = "2026/10/13/cover.png";
+        Path image = uploadDirectory.resolve(storedImagePath);
+        Files.createDirectories(image.getParent());
+        Files.write(image, new byte[]{
+                (byte) 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
+        });
+
+        FileUpload metadata = new FileUpload();
+        metadata.setFilePath(storedImagePath);
+        metadata.setBusinessType("ARTICLE");
+        metadata.setBusinessField("cover");
+        when(fileUploadMapper.selectOne(any())).thenReturn(metadata);
+
+        mockMvc = MockMvcBuilders.standaloneSetup(new FileController(fileService))
+                .setControllerAdvice(new GlobalExceptionHandler())
+                .build();
+    }
+
+    @Test
+    void preservesPublicArticleImageUrlAndAddsSafeContentHeaders() throws Exception {
+        mockMvc.perform(get("/file/uploads/" + storedImagePath))
+                .andExpect(status().isOk())
+                .andExpect(content().contentType("image/png"))
+                .andExpect(header().string("X-Content-Type-Options", "nosniff"));
+    }
+
+    @Test
+    void doesNotServeLegacyDocumentThroughPublicUploadUrl() throws Exception {
+        mockMvc.perform(get("/file/uploads/2026/10/13/private.pdf"))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void returnsHttpNotFoundWhenImageMetadataDoesNotExist() throws Exception {
+        when(fileUploadMapper.selectOne(any())).thenReturn(null);
+
+        mockMvc.perform(get("/file/uploads/2026/10/13/missing.png"))
+                .andExpect(status().isNotFound());
+    }
+}

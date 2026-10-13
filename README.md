@@ -97,18 +97,22 @@ Agent 默认监听 http://localhost:5000。私有接口要求 X-Agent-Token；�
 
 ### 3. 启动后端
 
-将与 Agent .env 中完全相同的 AGENT_INTERNAL_TOKEN 提供给 Spring Boot 进程：
+提供 JWT 随机密钥和与 Agent .env 中完全相同的 AGENT_INTERNAL_TOKEN。只有本地演示需要显式启用 demo profile：
 
     cd server
+    export JWT_SECRET="$(openssl rand -hex 32)"
+    export SPRING_PROFILES_ACTIVE=demo
     export AGENT_INTERNAL_TOKEN='your-long-random-secret'
     mvn spring-boot:run
 
 PowerShell 示例：
 
+    $env:JWT_SECRET = '<至少 32 字节的随机密钥>'
+    $env:SPRING_PROFILES_ACTIVE = 'demo'
     $env:AGENT_INTERNAL_TOKEN = 'your-long-random-secret'
     mvn spring-boot:run
 
-后端默认监听 http://localhost:8080。仅在空数据库初始化时创建演示管理员 admin/admin123 和演示数据；部署前应替换演示凭据。
+后端默认监听 http://localhost:8080。演示账号和样例数据仅在显式启用 demo profile 时创建；不要在生产环境启用该 profile。未配置有效 JWT_SECRET 时应用拒绝启动。
 
 ### 4. 启动前端
 

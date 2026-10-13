@@ -26,7 +26,11 @@ public class AdminAuthorizationInterceptor implements HandlerInterceptor {
     }
 
     private boolean requiresAdmin(HttpServletRequest request) {
-        String path = request.getRequestURI();
+        String requestUri = request.getRequestURI();
+        String path = requestUri.substring(request.getContextPath().length());
+        if ("/file/upload".equals(path) && "POST".equalsIgnoreCase(request.getMethod())) {
+            return true;
+        }
         if (path.startsWith("/data-analytics/")
                 || path.startsWith("/emotion-diary/admin/")
                 || path.startsWith("/psychological-chat/admin/")) {

@@ -76,3 +76,6 @@ server/org/
 !/server/src/main/java/com/
 !/server/src/main/java/com/amha/
 !/server/src/main/java/com/amha/**/*.java
+!/server/src/test/java/com/
+!/server/src/test/java/com/amha/
+!/server/src/test/java/com/amha/**/*.java
