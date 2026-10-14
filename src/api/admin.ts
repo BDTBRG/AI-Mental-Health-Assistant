@@ -9,6 +9,7 @@ import type {
 	ConsultationMessage,
 	KnowledgeArticle,
 	ConsultationSessionItem,
+	EmotionLogSearchParams,
 	EmotionLogItem,
 	ListData,
 	DashboardData,
@@ -95,14 +96,65 @@ export function getConsultationSessionDetail(
 	return request.get(`/psychological-chat/sessions/${sessionId}/messages`)
 }
 
-export function getEmotionlogPage(
-	params: ConsultationSearchParams,
+const parseEmotionDiaryPageInteger = (
+	value: string | undefined,
+	defaultValue: number,
+	maximum: number,
+	fieldName: string,
+) => {
+	const normalizedValue = value?.trim()
+	if (!normalizedValue) return defaultValue
+
+	const parsedValue = Number(normalizedValue)
+	if (
+		!/^\d+$/.test(normalizedValue) ||
+		!Number.isSafeInteger(parsedValue) ||
+		parsedValue < 1 ||
+		parsedValue > maximum
+	) {
+		throw new RangeError(`情绪日记${fieldName}分页参数无效`)
+	}
+	return parsedValue
+}
+
+export async function getEmotionlogPage(
+	params: EmotionLogSearchParams,
 ): Promise<ListData<EmotionLogItem>> {
+	const scoreRangeValue = params.modelScoreRange?.trim()
+	const scoreRange = scoreRangeValue?.match(/^(\d+)-(\d+)$/)
+	if (
+		scoreRangeValue &&
+		(!scoreRange ||
+			Number(scoreRange[1]) < 1 ||
+			Number(scoreRange[1]) > 10 ||
+			Number(scoreRange[2]) < 1 ||
+			Number(scoreRange[2]) > 10 ||
+			Number(scoreRange[1]) > Number(scoreRange[2]))
+	) {
+		throw new RangeError('情绪日记评分范围无效，必须在1到10之间且最小值不大于最大值')
+	}
+	const userId = params.userId?.trim()
+	const dominantEmotion = params.dominantEmotion?.trim()
+	const currentPage = parseEmotionDiaryPageInteger(
+		params.currentPage,
+		1,
+		2_147_483_647,
+		'当前页',
+	)
+	const size = parseEmotionDiaryPageInteger(params.size, 10, 100, '每页条数')
+
 	return request.get('/emotion-diary/admin/page', {
 		params: {
-			current: params.currentPage || 1,
-			size: params.size || 10,
-			dominantEmotion: params.emotionTag,
+			currentPage,
+			size,
+			...(userId ? { userId } : {}),
+			...(dominantEmotion ? { dominantEmotion } : {}),
+			...(scoreRange
+				? {
+						minMoodScore: Number(scoreRange[1]),
+						maxMoodScore: Number(scoreRange[2]),
+					}
+				: {}),
 		},
 	})
 }

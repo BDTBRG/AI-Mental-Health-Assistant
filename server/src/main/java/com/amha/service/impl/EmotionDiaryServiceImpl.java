@@ -77,10 +77,11 @@ public class EmotionDiaryServiceImpl implements EmotionDiaryService {
         if (query.getMaxMoodScore() != null) {
             wrapper.le(EmotionDiary::getMoodScore, query.getMaxMoodScore());
         }
-        if (StrUtil.isNotBlank(query.getUserId())) {
-            wrapper.eq(EmotionDiary::getUserId, Long.parseLong(query.getUserId()));
+        if (query.getUserId() != null) {
+            wrapper.eq(EmotionDiary::getUserId, query.getUserId());
         }
-        wrapper.orderByDesc(EmotionDiary::getCreatedAt);
+        wrapper.orderByDesc(EmotionDiary::getCreatedAt)
+                .orderByDesc(EmotionDiary::getId);
 
         Page<EmotionDiary> page = new Page<>(query.getCurrentPage(), query.getSize());
         IPage<EmotionDiary> result = diaryMapper.selectPage(page, wrapper);

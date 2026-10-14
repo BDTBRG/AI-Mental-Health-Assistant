@@ -2,18 +2,21 @@
 	<div>
 		<PageHead title="情绪日志" />
 		<TableSearch :formItem="formItem" @search="handleSearch" />
+		<div v-if="queryError" class="query-error" role="alert">
+			<span>{{ queryError }}</span>
+			<button data-testid="query-retry" type="button" @click="handleRetry">
+				重试
+			</button>
+		</div>
 		<el-table :data="tableData" style="width: 100%; margin-top: 25px">
-			<el-table-column prop="id" label="用户ID" width="80" />
-			<el-table-column label="会话ID" width="80">
-				<template #default="scope">
-					<el-avatar>{{ scope.row.nickName }}</el-avatar>
-				</template>
-			</el-table-column>
+			<el-table-column prop="userId" label="用户ID" width="80" />
+			<el-table-column prop="username" label="用户名" width="130" />
+			<el-table-column prop="nickname" label="昵称" width="100" />
 			<el-table-column prop="diaryDate" label="记录日期" width="120" />
-			<el-table-column prop="modelScore" label="情绪评分" width="120">
+			<el-table-column prop="moodScore" label="情绪评分" width="120">
 				<template #default="scope">
 					<el-rate
-						:model-value="scope.row.modelScore"
+						:model-value="scope.row.moodScore"
 						:max="10"
 						disabled />
 				</template>
@@ -41,6 +44,8 @@
 					>
 					<el-button
 						@click="handleDelete(scope.row)"
+						:loading="deletingIds.has(scope.row.id)"
+						:disabled="deletingIds.has(scope.row.id)"
 						text
 						type="danger"
 						>删除</el-button
@@ -51,10 +56,10 @@
 		<el-pagination
 			style="margin-top: 25px"
 			v-model:current-page="pagination.currentPage"
-			v-model:page-size="pagination.size"
+			:page-size="PAGE_SIZE"
 			:total="Number(pagination.total)"
 			layout="prev, pager, next, total"
-			@change="handleSearch" />
+			@current-change="handleCurrentPageChange" />
 		<el-dialog
 			v-model="detailDialogVisible"
 			title="情绪日志详情"
@@ -71,7 +76,7 @@
 							currentDetail.nickname
 						}}</el-descriptions-item>
 						<el-descriptions-item label="用户ID">{{
-							currentDetail.id
+							currentDetail.userId
 						}}</el-descriptions-item>
 						<el-descriptions-item label="记录日期">{{
 							currentDetail.diaryDate
@@ -130,7 +135,10 @@
 				</div>
 				<div class="detail-section">
 					<h4>AI情绪分析结果</h4>
-					<div class="ai-analysis-result">
+					<div v-if="aiDataError" class="analysis-data-error" role="alert">
+						分析数据无法读取
+					</div>
+					<div v-else class="ai-analysis-result">
 						<el-descriptions :column="2" border>
 							<el-descriptions-item label="主要情绪">
 								<el-tag
@@ -285,6 +293,15 @@ const formItem: FormItemConfig[] = [
 		placeholder: '请输入用户ID',
 	},
 	{
+		label: '主要情绪',
+		prop: 'dominantEmotion',
+		comp: 'el-select',
+		placeholder: '请选择主要情绪',
+		options: ['开心', '平静', '焦虑', '悲伤', '兴奋', '疲惫', '惊讶', '困惑'].map(
+			emotion => ({ label: emotion, value: emotion }),
+		),
+	},
+	{
 		label: '情绪评分',
 		prop: 'modelScoreRange',
 		comp: 'el-select',
@@ -299,47 +316,217 @@ const formItem: FormItemConfig[] = [
 
 const tableData = ref<EmotionLogItem[]>([])
 
-const pagination = reactive({ currentPage: '1', size: '10', total: '0' })
+const PAGE_SIZE = 10
+const MAX_PAGE_FALLBACK_RETRIES = 3
+const pagination = reactive({ currentPage: 1, total: '0' })
+const searchFilters = ref<EmotionLogSearchParams>({})
+const queryError = ref('')
+const deletingIds = ref(new Set<number>())
+let latestQuerySequence = 0
+
+type EmotionLogsLoadResult = 'loaded' | 'failed' | 'unstable' | 'stale'
+
+const loadEmotionLogs = async (): Promise<EmotionLogsLoadResult> => {
+	const querySequence = ++latestQuerySequence
+	const params: EmotionLogSearchParams = {
+		...searchFilters.value,
+		currentPage: String(pagination.currentPage),
+		size: String(PAGE_SIZE),
+	}
+	let requestedPage = Number(params.currentPage) || 1
+	let retryCount = 0
+	tableData.value = []
+	queryError.value = ''
+
+	try {
+		let response = await getEmotionlogPage(params)
+		while (true) {
+			if (querySequence !== latestQuerySequence) return 'stale'
+
+			const responseSize = Number(response.size) || PAGE_SIZE
+			const lastValidPage = Math.max(
+				1,
+				Math.ceil(response.total / responseSize),
+			)
+			if (
+				response.records.length > 0 ||
+				requestedPage <= lastValidPage ||
+				retryCount >= MAX_PAGE_FALLBACK_RETRIES
+			) {
+				break
+			}
+
+			requestedPage = lastValidPage
+			pagination.currentPage = lastValidPage
+			retryCount += 1
+			response = await getEmotionlogPage({
+				...params,
+				currentPage: String(pagination.currentPage),
+			})
+		}
+
+		if (querySequence !== latestQuerySequence) return 'stale'
+
+		const responseSize = Number(response.size) || PAGE_SIZE
+		const lastValidPage = Math.max(
+			1,
+			Math.ceil(response.total / responseSize),
+		)
+		if (response.records.length === 0 && requestedPage > lastValidPage) {
+			pagination.currentPage = lastValidPage
+			pagination.total = response.total.toString()
+			queryError.value = '列表仍在变化，请重试'
+			return 'unstable'
+		}
+
+		tableData.value = response.records as EmotionLogItem[]
+		pagination.total = response.total.toString()
+		return 'loaded'
+	} catch {
+		if (querySequence !== latestQuerySequence) return 'stale'
+		tableData.value = []
+		pagination.total = '0'
+		queryError.value = '查询失败，请重试'
+		return 'failed'
+	}
+}
 
 const handleSearch = async (formData?: SearchFormData) => {
-	const params: EmotionLogSearchParams = { ...pagination, ...formData }
-
-	const { records, total } = await getEmotionlogPage(params)
-	tableData.value = records as EmotionLogItem[]
-	pagination.total = total.toString()
+	searchFilters.value = formData
+		? { ...(formData as EmotionLogSearchParams) }
+		: {}
+	pagination.currentPage = 1
+	await loadEmotionLogs()
 }
+
+const handleCurrentPageChange = (currentPage: number) => {
+	pagination.currentPage = currentPage
+	return loadEmotionLogs()
+}
+
+const handleRetry = () => loadEmotionLogs()
 
 const detailDialogVisible = ref<boolean>(false)
 const currentDetail = ref<EmotionLogItem | null>(null)
 const aiData = ref<Record<string, unknown>>({})
+const aiDataError = ref(false)
 const viewSessionDetail = (row: EmotionLogItem) => {
 	currentDetail.value = row
 	detailDialogVisible.value = true
-	if (row.aiEmotionAnalysis) {
-		aiData.value = JSON.parse(row.aiEmotionAnalysis)
-		console.log('AI分析结果：', aiData.value)
-	} else {
+	aiData.value = {}
+	aiDataError.value = false
+	if (!row.aiEmotionAnalysis) {
 		aiData.value = { primaryEmotion: '暂无AI分析结果' }
+		return
+	}
+
+	try {
+		const parsedData: unknown = JSON.parse(row.aiEmotionAnalysis)
+		if (
+			parsedData === null ||
+			typeof parsedData !== 'object' ||
+			Array.isArray(parsedData)
+		) {
+			throw new TypeError('AI 情绪分析数据必须为对象')
+		}
+		aiData.value = parsedData as Record<string, unknown>
+	} catch {
+		aiDataError.value = true
 	}
 }
 
-const handleDelete = (row: EmotionLogItem) => {
-	ElMessageBox.confirm('确定要删除这条情绪日志吗？', '提示', {
-		confirmButtonText: '删除',
-		cancelButtonText: '取消',
-		type: 'warning',
-	}).then(async () => {
+const handleDelete = async (row: EmotionLogItem) => {
+	if (deletingIds.value.has(row.id)) return
+	deletingIds.value.add(row.id)
+
+	try {
+		try {
+			await ElMessageBox.confirm('确定要删除这条情绪日志吗？', '提示', {
+				confirmButtonText: '删除',
+				cancelButtonText: '取消',
+				type: 'warning',
+			})
+		} catch {
+			return
+		}
+
 		try {
 			await deleteEmotionLog(row.id)
-			ElMessageBox.alert('删除成功', '提示', { type: 'success' })
-			handleSearch()
-		} catch (error) {
-			ElMessageBox.alert('删除失败，请稍后再试', '错误', {
-				type: 'error',
-			})
+		} catch {
+			const refreshResult = await loadEmotionLogs()
+			if (refreshResult === 'unstable') {
+				await ElMessageBox.alert(
+					'删除结果不确定，列表仍在变化，暂无法确认状态',
+					'提示',
+					{ type: 'warning' },
+				)
+				return
+			}
+			if (refreshResult === 'failed') {
+				await ElMessageBox.alert(
+					'删除结果不确定，列表刷新失败，请手动核对',
+					'提示',
+					{ type: 'warning' },
+				)
+				return
+			}
+			if (refreshResult === 'stale') {
+				await ElMessageBox.alert(
+					'删除结果不确定，列表已变化，请手动核对',
+					'提示',
+					{ type: 'warning' },
+				)
+				return
+			}
+			if (tableData.value.some(item => item.id === row.id)) {
+				await ElMessageBox.alert(
+					'删除结果未确认，记录仍显示在列表中，请稍后核对',
+					'提示',
+					{ type: 'warning' },
+				)
+				return
+			}
+			await ElMessageBox.alert(
+				'删除结果不确定，记录已不在当前列表中，请手动核对',
+				'提示',
+				{ type: 'warning' },
+			)
+			return
 		}
-	})
-	handleSearch()
+
+		const refreshResult = await loadEmotionLogs()
+		if (refreshResult === 'unstable') {
+			await ElMessageBox.alert(
+				'删除已成功，但列表仍在变化，暂无法确认列表状态',
+				'提示',
+				{ type: 'warning' },
+			)
+			return
+		}
+		if (refreshResult === 'failed') {
+			await ElMessageBox.alert(
+				'删除已成功，但列表刷新失败，请手动刷新列表',
+				'提示',
+				{ type: 'warning' },
+			)
+			return
+		}
+		if (
+			refreshResult === 'loaded' &&
+			tableData.value.some(item => item.id === row.id)
+		) {
+			await ElMessageBox.alert(
+				'删除请求已成功，但记录仍显示在列表中，请刷新核对',
+				'提示',
+				{ type: 'warning' },
+			)
+			return
+		}
+
+		await ElMessageBox.alert('删除成功', '提示', { type: 'success' })
+	} finally {
+		deletingIds.value.delete(row.id)
+	}
 }
 
 onMounted(() => {

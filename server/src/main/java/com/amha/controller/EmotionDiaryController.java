@@ -41,7 +41,7 @@ public class EmotionDiaryController {
     // ---- 管理端 ----
 
     @GetMapping("/admin/page")
-    public Result<PageResult<EmotionDiaryVO>> getAdminPage(EmotionDiaryPageQuery query,
+    public Result<PageResult<EmotionDiaryVO>> getAdminPage(@Valid @ModelAttribute EmotionDiaryPageQuery query,
                                                             HttpServletRequest request) {
         Long actorUserId = requireAdmin(request);
         return Result.success(emotionDiaryService.getAdminPage(query, actorUserId));

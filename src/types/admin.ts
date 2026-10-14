@@ -132,11 +132,10 @@ export interface ConsultationMessage {
 
 // 情绪日志查询参数
 export interface EmotionLogSearchParams {
-	current?: string
-	dominantEmotion?: string
-	maxMoodScore?: string
-	minMoodScore?: string
+	currentPage?: string
 	size?: string
+	dominantEmotion?: string
+	modelScoreRange?: string
 	userId?: string
 }
 

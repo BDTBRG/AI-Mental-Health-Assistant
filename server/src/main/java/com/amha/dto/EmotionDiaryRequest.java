@@ -2,6 +2,8 @@ package com.amha.dto;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import lombok.Data;
 
 @Data
@@ -19,6 +21,8 @@ public class EmotionDiaryRequest {
     private String emotionTriggers;
 
     @NotNull(message = "情绪评分不能为空")
+    @Min(value = 1, message = "情绪评分必须大于等于1")
+    @Max(value = 10, message = "情绪评分不能超过10")
     private Integer moodScore;
 
     private Integer sleepQuality;
