@@ -3,12 +3,14 @@ package com.amha.service.impl;
 import com.amha.common.BusinessException;
 import com.amha.entity.FileUpload;
 import com.amha.mapper.FileUploadMapper;
+import com.amha.storage.LocalFileObjectStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.mock.web.MockMultipartFile;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -26,10 +28,10 @@ class FileServiceImplTest {
     @BeforeEach
     void setUp() {
         fileUploadMapper = mock(FileUploadMapper.class);
-        fileService = new FileServiceImpl(fileUploadMapper);
-        ReflectionTestUtils.setField(fileService, "uploadPath", uploadDirectory.toString());
+        fileService = new FileServiceImpl(fileUploadMapper, new LocalFileObjectStore(uploadDirectory.toString()));
         ReflectionTestUtils.setField(fileService, "allowedExtensions", "png,jpg,jpeg,gif,webp");
         ReflectionTestUtils.setField(fileService, "maxFileSizeBytes", 5L * 1024 * 1024);
+        when(fileUploadMapper.insert(any(FileUpload.class))).thenReturn(1);
     }
 
     @Test
@@ -139,6 +141,56 @@ class FileServiceImplTest {
 
         assertTrue(result.get("filePath").matches("/file/uploads/\\d{4}/\\d{2}/\\d{2}/[0-9a-f-]+\\.png"));
         verify(fileUploadMapper).insert(any(FileUpload.class));
+    }
+
+    @Test
+    void removesStoredObjectWhenDatabaseMetadataCannotBeCreated() throws Exception {
+        when(fileUploadMapper.insert(any(FileUpload.class))).thenReturn(0);
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "cover.png", "image/png", validPng()
+        );
+
+        assertThrows(IllegalStateException.class,
+                () -> fileService.uploadFile(file, "ARTICLE", "draft-id", "cover"));
+
+        try (var files = Files.walk(uploadDirectory)) {
+            assertEquals(0, files.filter(Files::isRegularFile).count());
+        }
+    }
+
+    @Test
+    void preservesObjectWhenDatabaseCommitStatusIsAmbiguous() throws Exception {
+        when(fileUploadMapper.insert(any(FileUpload.class)))
+                .thenThrow(new IllegalStateException("connection lost after write"));
+        when(fileUploadMapper.selectOne(any())).thenReturn(new FileUpload());
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "cover.png", "image/png", validPng()
+        );
+
+        assertThrows(IllegalStateException.class,
+                () -> fileService.uploadFile(file, "ARTICLE", "draft-id", "cover"));
+
+        try (var files = Files.walk(uploadDirectory)) {
+            assertEquals(1, files.filter(Files::isRegularFile).count());
+        }
+    }
+
+    @Test
+    void preservesObjectWhenCommitStatusLookupAlsoFails() throws Exception {
+        when(fileUploadMapper.insert(any(FileUpload.class)))
+                .thenThrow(new IllegalStateException("connection lost after write"));
+        when(fileUploadMapper.selectOne(any()))
+                .thenThrow(new IllegalStateException("database unavailable"));
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "cover.png", "image/png", validPng()
+        );
+
+        assertThrows(IllegalStateException.class,
+                () -> fileService.uploadFile(file, "ARTICLE", "draft-id", "cover"));
+
+        try (var files = Files.walk(uploadDirectory)) {
+            assertEquals(1, files.filter(Files::isRegularFile).count());
+        }
     }
 
     private static byte[] validPng() {

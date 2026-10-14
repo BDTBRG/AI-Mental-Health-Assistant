@@ -6,10 +6,15 @@ import com.amha.common.BusinessException;
 import com.amha.entity.FileUpload;
 import com.amha.mapper.FileUploadMapper;
 import com.amha.service.FileService;
+import com.amha.storage.FileObjectStore;
+import com.amha.storage.FileObjectStat;
+import com.amha.storage.FileStorageException;
+import com.amha.storage.StorageObjectKey;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.io.AbstractResource;
 import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
@@ -19,21 +24,15 @@ import javax.imageio.ImageReader;
 import javax.imageio.stream.ImageInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.InvalidPathException;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.nio.file.StandardOpenOption;
+import java.io.InputStream;
 import java.util.*;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class FileServiceImpl implements FileService {
 
     private static final Set<String> ARTICLE_IMAGE_EXTENSIONS = Set.of("jpg", "jpeg", "png", "gif", "webp");
-
-    @Value("${file.upload.path:./uploads}")
-    private String uploadPath;
 
     @Value("${file.upload.allowed-extensions:jpg,jpeg,png,gif,webp}")
     private String allowedExtensions;
@@ -78,19 +77,12 @@ public class FileServiceImpl implements FileService {
 
         String newFilename = IdUtil.fastSimpleUUID() + "." + ext;
         String dateDir = cn.hutool.core.date.DateUtil.format(new Date(), "yyyy/MM/dd");
-        Path root = Paths.get(uploadPath).toAbsolutePath().normalize();
-        Path destination = root.resolve(dateDir).resolve(newFilename).normalize();
-        if (!destination.startsWith(root)) {
-            throw new BusinessException("上传路径无效");
-        }
-        try {
-            Files.createDirectories(destination.getParent());
-            Files.write(destination, content, StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
-        } catch (IOException e) {
-            throw new BusinessException("文件保存失败");
-        }
-
         String relativePath = dateDir + "/" + newFilename;
+        try (ByteArrayInputStream input = new ByteArrayInputStream(content)) {
+            fileObjectStore.put(relativePath, input, content.length, imageMediaType(ext));
+        } catch (IOException e) {
+            throw new FileStorageException("Unable to read upload content for storage", e);
+        }
 
         FileUpload record = new FileUpload();
         record.setFileName(originalFilename);
@@ -100,12 +92,20 @@ public class FileServiceImpl implements FileService {
         record.setBusinessId(businessId.trim());
         record.setBusinessField("cover");
         try {
-            fileUploadMapper.insert(record);
+            if (fileUploadMapper.insert(record) <= 0) {
+                throw new IllegalStateException("File metadata was not saved");
+            }
         } catch (RuntimeException e) {
-            try {
-                Files.deleteIfExists(destination);
-            } catch (IOException ignored) {
-                // The upload failure remains authoritative; orphan cleanup is handled separately.
+            if (metadataMayExist(relativePath)) {
+                log.warn("Preserving stored object because file metadata commit status is uncertain: {}", relativePath);
+            } else {
+                try {
+                    fileObjectStore.delete(relativePath);
+                } catch (RuntimeException cleanupException) {
+                    // If compensation also fails, reconcile the orphan later.
+                    log.warn("Unable to compensate a failed file metadata insert for object key {}",
+                            relativePath, cleanupException);
+                }
             }
             throw e;
         }
@@ -131,20 +131,12 @@ public class FileServiceImpl implements FileService {
             throw fileNotFound();
         }
 
-        try {
-            Path root = Paths.get(uploadPath).toAbsolutePath().normalize().toRealPath();
-            Path image = root.resolve(normalizedPath).normalize();
-            if (!image.startsWith(root) || !Files.isRegularFile(image)) {
-                throw fileNotFound();
-            }
-            Path realImage = image.toRealPath();
-            if (!realImage.startsWith(root)) {
-                throw fileNotFound();
-            }
-            return new FileSystemResource(realImage);
-        } catch (IOException | InvalidPathException e) {
+        FileObjectStat stat = fileObjectStore.stat(normalizedPath);
+        if (stat == null) {
             throw fileNotFound();
         }
+        String filename = normalizedPath.substring(normalizedPath.lastIndexOf('/') + 1);
+        return new StoredFileResource(fileObjectStore, normalizedPath, filename, stat.size());
     }
 
     private Set<String> configuredExtensions() {
@@ -156,28 +148,31 @@ public class FileServiceImpl implements FileService {
     }
 
     private static String normalizeRelativePath(String relativePath) {
-        if (relativePath == null || relativePath.isBlank()
-                || relativePath.contains("\\") || relativePath.contains(":")
-                || relativePath.startsWith("/") || relativePath.indexOf(0) >= 0) {
+        try {
+            return StorageObjectKey.normalize(relativePath);
+        } catch (IllegalArgumentException e) {
             throw fileNotFound();
         }
+    }
+
+    private static String imageMediaType(String extension) {
+        return switch (extension) {
+            case "jpg", "jpeg" -> "image/jpeg";
+            case "png" -> "image/png";
+            case "gif" -> "image/gif";
+            case "webp" -> "image/webp";
+            default -> "application/octet-stream";
+        };
+    }
+
+    private boolean metadataMayExist(String relativePath) {
         try {
-            Path path = Paths.get(relativePath);
-            if (path.isAbsolute()) {
-                throw fileNotFound();
-            }
-            for (Path segment : path) {
-                if (".".equals(segment.toString()) || "..".equals(segment.toString())) {
-                    throw fileNotFound();
-                }
-            }
-            String normalized = path.normalize().toString().replace('\\', '/');
-            if (!relativePath.equals(normalized)) {
-                throw fileNotFound();
-            }
-            return normalized;
-        } catch (InvalidPathException e) {
-            throw fileNotFound();
+            return fileUploadMapper.selectOne(new LambdaQueryWrapper<FileUpload>()
+                    .eq(FileUpload::getFilePath, relativePath)) != null;
+        } catch (RuntimeException lookupException) {
+            log.warn("Unable to determine file metadata commit status for object key {}; preserving object",
+                    relativePath, lookupException);
+            return true;
         }
     }
 
@@ -379,5 +374,40 @@ public class FileServiceImpl implements FileService {
         return new BusinessException("404", "文件不存在");
     }
 
+    private static final class StoredFileResource extends AbstractResource {
+        private final FileObjectStore fileObjectStore;
+        private final String key;
+        private final String filename;
+        private final long size;
+
+        private StoredFileResource(FileObjectStore fileObjectStore, String key, String filename, long size) {
+            this.fileObjectStore = fileObjectStore;
+            this.key = key;
+            this.filename = filename;
+            this.size = size;
+        }
+
+        @Override
+        public InputStream getInputStream() throws IOException {
+            return fileObjectStore.open(key);
+        }
+
+        @Override
+        public String getFilename() {
+            return filename;
+        }
+
+        @Override
+        public long contentLength() {
+            return size;
+        }
+
+        @Override
+        public String getDescription() {
+            return "stored object " + key;
+        }
+    }
+
     private final FileUploadMapper fileUploadMapper;
+    private final FileObjectStore fileObjectStore;
 }

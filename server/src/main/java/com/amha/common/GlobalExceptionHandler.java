@@ -1,5 +1,6 @@
 package com.amha.common;
 
+import com.amha.storage.FileStorageException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.validation.BindException;
@@ -16,6 +17,13 @@ public class GlobalExceptionHandler {
     public Result<Void> handleBusinessException(BusinessException e) {
         log.warn("业务异常: code={}, msg={}", e.getCode(), e.getMessage());
         return Result.error(e.getCode(), e.getMessage());
+    }
+
+    @ExceptionHandler(FileStorageException.class)
+    @ResponseStatus(HttpStatus.SERVICE_UNAVAILABLE)
+    public Result<Void> handleFileStorageException(FileStorageException e) {
+        log.warn("文件存储服务暂不可用", e);
+        return Result.error("503", "文件存储服务暂不可用");
     }
 
     @ExceptionHandler(BindException.class)
