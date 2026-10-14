@@ -24,6 +24,24 @@ AGENT_CHECKPOINT_DB = os.getenv(
 )
 AGENT_CHECKPOINT_POSTGRES_DSN = os.getenv("AGENT_CHECKPOINT_POSTGRES_DSN", "")
 AGENT_INTERNAL_TOKEN = os.getenv("AGENT_INTERNAL_TOKEN", "")
+RAG_BACKEND = os.getenv("RAG_BACKEND", "faiss").strip().lower()
+if RAG_BACKEND not in {"faiss", "qdrant"}:
+    raise ValueError("RAG_BACKEND must be 'faiss' or 'qdrant'")
+RAG_QDRANT_URL = os.getenv("RAG_QDRANT_URL", "http://localhost:6333").strip()
+RAG_QDRANT_API_KEY = os.getenv("RAG_QDRANT_API_KEY", "")
+RAG_QDRANT_COLLECTION_ALIAS = os.getenv(
+    "RAG_QDRANT_COLLECTION_ALIAS",
+    "mental_health_knowledge",
+).strip()
+RAG_WRITE_LOCK_REDIS_URL = os.getenv(
+    "RAG_WRITE_LOCK_REDIS_URL",
+    os.getenv("REDIS_URL", ""),
+).strip()
+RAG_WRITE_LOCK_NAME = os.getenv("RAG_WRITE_LOCK_NAME", "amha:rag:index-write").strip()
+RAG_WRITE_LOCK_TTL_SECONDS = max(60, int(os.getenv("RAG_WRITE_LOCK_TTL_SECONDS", "1800")))
+RAG_WRITE_LOCK_WAIT_SECONDS = max(1, int(os.getenv("RAG_WRITE_LOCK_WAIT_SECONDS", "60")))
+if RAG_BACKEND == "qdrant" and not RAG_WRITE_LOCK_REDIS_URL:
+    raise ValueError("RAG_WRITE_LOCK_REDIS_URL is required when RAG_BACKEND=qdrant")
 LLM_MAX_CONCURRENT_CALLS = max(1, int(os.getenv("LLM_MAX_CONCURRENT_CALLS", "8")))
 LLM_REQUEST_TIMEOUT_SECONDS = max(5, int(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "50")))
 LLM_CIRCUIT_FAILURE_THRESHOLD = max(2, int(os.getenv("LLM_CIRCUIT_FAILURE_THRESHOLD", "5")))

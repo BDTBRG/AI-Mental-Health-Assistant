@@ -2,6 +2,7 @@
 
 import logging
 import hashlib
+import asyncio
 from typing import Any, AsyncGenerator, Dict, List, Literal, TypedDict
 
 from langchain_openai import ChatOpenAI
@@ -135,6 +136,7 @@ class AgentChatService:
 
     async def _call_model(self, state: AgentState) -> Dict[str, Any]:
         call_context = dict(state.get("agent_context", {}))
+        await asyncio.to_thread(rag_service.refresh_shared_index_state)
         call_context["knowledgeIndexVersion"] = rag_service.index_version
         response = await llm_call_governor.invoke(
             self.llm_with_tools,

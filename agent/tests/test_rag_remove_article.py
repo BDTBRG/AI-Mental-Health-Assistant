@@ -20,6 +20,8 @@ class MutableFakeIndex:
 
 def service_with_two_articles():
     service = RAGService.__new__(RAGService)
+    service.backend = "faiss"
+    service.qdrant_store = None
     service.index = MutableFakeIndex([0, 1, 2])
     service.chunks = [
         TextChunk(0, 7, "待删除", "文章 7 内容", 0, 6),

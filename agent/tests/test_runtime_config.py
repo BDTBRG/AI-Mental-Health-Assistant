@@ -26,6 +26,15 @@ def load_config(environment):
             "AGENT_CHECKPOINT_BACKEND",
             "AGENT_CHECKPOINT_DB",
             "AGENT_CHECKPOINT_POSTGRES_DSN",
+            "RAG_BACKEND",
+            "RAG_QDRANT_URL",
+            "RAG_QDRANT_API_KEY",
+            "RAG_QDRANT_COLLECTION_ALIAS",
+            "RAG_WRITE_LOCK_REDIS_URL",
+            "RAG_WRITE_LOCK_NAME",
+            "RAG_WRITE_LOCK_TTL_SECONDS",
+            "RAG_WRITE_LOCK_WAIT_SECONDS",
+            "REDIS_URL",
         )
         for key in runtime_keys:
             if key not in environment:
@@ -84,6 +93,30 @@ class AgentRuntimeConfigTests(unittest.TestCase):
     def test_checkpoint_backend_rejects_unknown_values(self):
         with self.assertRaisesRegex(ValueError, "AGENT_CHECKPOINT_BACKEND"):
             load_config({"AGENT_CHECKPOINT_BACKEND": "memory"})
+
+    def test_rag_backend_defaults_to_local_faiss(self):
+        config, _ = load_config({})
+        self.assertEqual("faiss", config.RAG_BACKEND)
+
+    def test_qdrant_backend_requires_shared_redis_lock_configuration(self):
+        config, _ = load_config({
+            "RAG_BACKEND": "qdrant",
+            "RAG_QDRANT_URL": "http://qdrant:6333",
+            "RAG_QDRANT_COLLECTION_ALIAS": "mental_health_knowledge",
+            "RAG_WRITE_LOCK_REDIS_URL": "redis://redis:6379/0",
+        })
+        self.assertEqual("qdrant", config.RAG_BACKEND)
+        self.assertEqual("http://qdrant:6333", config.RAG_QDRANT_URL)
+        self.assertEqual("mental_health_knowledge", config.RAG_QDRANT_COLLECTION_ALIAS)
+        self.assertEqual("redis://redis:6379/0", config.RAG_WRITE_LOCK_REDIS_URL)
+
+    def test_qdrant_backend_fails_fast_without_shared_redis_lock_url(self):
+        with self.assertRaisesRegex(ValueError, "RAG_WRITE_LOCK_REDIS_URL"):
+            load_config({"RAG_BACKEND": "qdrant"})
+
+    def test_rag_backend_rejects_unknown_values(self):
+        with self.assertRaisesRegex(ValueError, "RAG_BACKEND"):
+            load_config({"RAG_BACKEND": "vector-db"})
 
     def test_port_accepts_only_valid_tcp_port_range(self):
         for port in ("1", "65535"):

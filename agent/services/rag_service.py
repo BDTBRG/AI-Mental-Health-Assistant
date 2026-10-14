@@ -21,6 +21,9 @@ from dataclasses import dataclass
 import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer
+import config
+
+from services.qdrant_rag_store import QdrantRAGStore
 
 logger = logging.getLogger(__name__)
 
@@ -53,15 +56,36 @@ class RAGService:
     MIN_SEMANTIC_SCORE = 0.32
     LEXICAL_CANDIDATE_FACTOR = 4
 
-    def __init__(self, model_name: str = "paraphrase-multilingual-MiniLM-L12-v2"):
+    def __init__(
+        self,
+        model_name: str = "paraphrase-multilingual-MiniLM-L12-v2",
+        backend: Optional[str] = None,
+        qdrant_store: Optional[QdrantRAGStore] = None,
+    ):
         self.model_name = model_name
+        self.backend = (backend or config.RAG_BACKEND).strip().lower()
+        if self.backend not in {"faiss", "qdrant"}:
+            raise ValueError("RAG backend must be 'faiss' or 'qdrant'")
+        self.qdrant_store = qdrant_store
+        if self.backend == "qdrant" and self.qdrant_store is None:
+            self.qdrant_store = QdrantRAGStore(
+                collection_alias=config.RAG_QDRANT_COLLECTION_ALIAS,
+                url=config.RAG_QDRANT_URL,
+                api_key=config.RAG_QDRANT_API_KEY,
+                redis_url=config.RAG_WRITE_LOCK_REDIS_URL,
+                lock_name=config.RAG_WRITE_LOCK_NAME,
+                lock_timeout_seconds=config.RAG_WRITE_LOCK_TTL_SECONDS,
+                lock_wait_seconds=config.RAG_WRITE_LOCK_WAIT_SECONDS,
+            )
         self.model: Optional[SentenceTransformer] = None
         self.index: Optional[faiss.Index] = None
         self.chunks: List[TextChunk] = []
         self._next_chunk_id = 0
         self.index_version = "unbuilt"
+        self._qdrant_collection_name: Optional[str] = None
 
-        os.makedirs(DATA_DIR, exist_ok=True)
+        if self.backend == "faiss":
+            os.makedirs(DATA_DIR, exist_ok=True)
 
     # ========== 模型懒加载（避免启动时卡住） ==========
 
@@ -140,6 +164,31 @@ class RAGService:
 
         logger.info(f"分块完成：{len(articles)} 篇文章 → {len(all_chunks)} 个文本块")
 
+        if self.backend == "qdrant":
+            texts = [chunk.content for chunk in all_chunks]
+            if texts:
+                embeddings = np.asarray(
+                    self.model.encode(texts, show_progress_bar=True, normalize_embeddings=True)
+                ).astype("float32")
+                vector_size = int(embeddings.shape[1])
+                vectors = embeddings.tolist()
+            else:
+                dimension = getattr(self.model, "get_sentence_embedding_dimension", None)
+                vector_size = int(dimension()) if callable(dimension) else 384
+                vectors = []
+
+            stats = self.qdrant_store.rebuild(
+                [self._chunk_record(chunk) for chunk in all_chunks],
+                vectors,
+                vector_size=vector_size,
+            )
+            self._qdrant_collection_name = self.qdrant_store.active_collection_name
+            self._apply_qdrant_snapshot(
+                self.qdrant_store.load_chunks(),
+                stats.get("index_version", "unbuilt"),
+            )
+            return int(stats["total_vectors"])
+
         if not all_chunks:
             logger.warning("没有可索引的内容，创建空索引")
             self.chunks = []
@@ -176,6 +225,9 @@ class RAGService:
 
     def add_article(self, article_id: int, title: str, content: str):
         """新增单篇文章到索引"""
+        if self.backend == "qdrant":
+            self._sync_qdrant_article(article_id, title, content)
+            return
         if self.index is None:
             self.rebuild_index([{"id": article_id, "title": title, "content": content}])
             return
@@ -198,6 +250,14 @@ class RAGService:
 
     def remove_article(self, article_id: int):
         """按文章 ID 删除所有相关分块"""
+        if self.backend == "qdrant":
+            stats = self.qdrant_store.delete_article(article_id)
+            self._qdrant_collection_name = self.qdrant_store.active_collection_name
+            self._apply_qdrant_snapshot(
+                self.qdrant_store.load_chunks(),
+                stats.get("index_version", "unbuilt"),
+            )
+            return
         if self.index is None:
             return
 
@@ -224,8 +284,68 @@ class RAGService:
 
     def update_article(self, article_id: int, title: str, content: str):
         """更新文章：先删旧块，再加新块"""
+        if self.backend == "qdrant":
+            self._sync_qdrant_article(article_id, title, content)
+            return
         self.remove_article(article_id)
         self.add_article(article_id, title, content)
+
+    @staticmethod
+    def _chunk_record(chunk: TextChunk) -> Dict:
+        return {
+            "chunk_id": chunk.chunk_id,
+            "article_id": chunk.article_id,
+            "article_title": chunk.article_title,
+            "content": chunk.content,
+            "char_start": chunk.char_start,
+            "char_end": chunk.char_end,
+        }
+
+    @staticmethod
+    def _chunk_from_record(record: Dict) -> TextChunk:
+        return TextChunk(
+            chunk_id=int(record["chunk_id"]),
+            article_id=int(record["article_id"]),
+            article_title=str(record["article_title"]),
+            content=str(record["content"]),
+            char_start=int(record["char_start"]),
+            char_end=int(record["char_end"]),
+        )
+
+    def _apply_qdrant_snapshot(self, records: List[Dict], index_version: str):
+        self.chunks = [
+            self._chunk_from_record(record["payload"])
+            for record in records
+            if record.get("payload")
+        ]
+        self.index = None
+        self._next_chunk_id = 0
+        self.index_version = index_version
+
+    def _sync_qdrant_article(self, article_id: int, title: str, content: str):
+        self._ensure_model()
+        chunks = self._split_text(content or "", int(article_id), title or "")
+        texts = [chunk.content for chunk in chunks]
+        if texts:
+            embeddings = np.asarray(
+                self.model.encode(texts, normalize_embeddings=True)
+            ).astype("float32")
+            vector_size = int(embeddings.shape[1])
+            vectors = embeddings.tolist()
+        else:
+            vectors = []
+            vector_size = None
+        stats = self.qdrant_store.sync_article(
+            [self._chunk_record(chunk) for chunk in chunks],
+            vectors,
+            article_id=int(article_id),
+            vector_size=vector_size,
+        )
+        self._qdrant_collection_name = self.qdrant_store.active_collection_name
+        self._apply_qdrant_snapshot(
+            self.qdrant_store.load_chunks(),
+            stats.get("index_version", "unbuilt"),
+        )
 
     # ========== 语义检索 ==========
 
@@ -242,15 +362,16 @@ class RAGService:
                 tokens.extend(segment[index:index + 2] for index in range(len(segment) - 1))
         return tokens
 
-    def _lexical_scores(self, query: str) -> Dict[int, float]:
+    def _lexical_scores(self, query: str, chunks: Optional[List[TextChunk]] = None) -> Dict[int, float]:
         """Return an IDF-weighted query-term coverage score for each chunk."""
         query_terms = set(self._tokenize(query))
-        if not query_terms or not self.chunks:
+        source_chunks = self.chunks if chunks is None else chunks
+        if not query_terms or not source_chunks:
             return {}
 
         document_terms = {
             chunk.chunk_id: self._tokenize(chunk.article_title + " " + chunk.content)
-            for chunk in self.chunks
+            for chunk in source_chunks
         }
         document_frequency: Dict[str, int] = {}
         for terms in document_terms.values():
@@ -284,6 +405,9 @@ class RAGService:
         返回 Top-K 相关片段，每个元素格式：
         {"title": "文章标题", "snippet": "片段文本", "score": 0.85}
         """
+        if self.backend == "qdrant":
+            return self._search_qdrant(query, top_k)
+
         if self.index is None or self.index.ntotal == 0:
             logger.warning("索引为空，返回空结果")
             return []
@@ -334,6 +458,65 @@ class RAGService:
 
         return sorted(results, key=lambda item: item["score"], reverse=True)[:top_k]
 
+    def _search_qdrant(self, query: str, top_k: int) -> List[Dict]:
+        if top_k <= 0:
+            return []
+        metadata = self.refresh_shared_index_state()
+        total_chunks = int(metadata.get("total_chunks", 0))
+        if metadata.get("collection_name") is None or total_chunks == 0:
+            return []
+
+        self._ensure_model()
+        query_vec = np.asarray(
+            self.model.encode([query], normalize_embeddings=True)
+        ).astype("float32")
+        candidate_limit = min(
+            max(top_k, top_k * self.LEXICAL_CANDIDATE_FACTOR),
+            total_chunks,
+        )
+        points = self.qdrant_store.search(query_vec[0].tolist(), candidate_limit)
+        semantic_scores: Dict[int, float] = {}
+        chunks_by_id: Dict[int, TextChunk] = {
+            chunk.chunk_id: chunk for chunk in self.chunks
+        }
+        for point in points:
+            payload = point.payload or {}
+            try:
+                chunk = self._chunk_from_record(payload)
+                score = max(0.0, min(1.0, float(point.score)))
+            except (KeyError, TypeError, ValueError):
+                logger.warning("Qdrant returned a chunk without valid metadata")
+                continue
+            chunks_by_id[chunk.chunk_id] = chunk
+            semantic_scores[chunk.chunk_id] = score
+
+        lexical_scores = self._lexical_scores(query)
+        lexical_candidates = sorted(
+            lexical_scores,
+            key=lexical_scores.get,
+            reverse=True,
+        )[:candidate_limit]
+        results = []
+        for chunk_id in set(semantic_scores) | set(lexical_candidates):
+            chunk = chunks_by_id.get(chunk_id)
+            if chunk is None:
+                continue
+            semantic_score = semantic_scores.get(chunk_id, 0.0)
+            lexical_score = lexical_scores.get(chunk_id, 0.0)
+            if semantic_score < self.MIN_SEMANTIC_SCORE and lexical_score < 0.25:
+                continue
+            confidence = 0.65 * semantic_score + 0.35 * lexical_score
+            results.append({
+                "chunkId": chunk.chunk_id,
+                "articleId": chunk.article_id,
+                "title": chunk.article_title,
+                "snippet": chunk.content,
+                "score": round(confidence, 4),
+                "semanticScore": round(semantic_score, 4),
+                "lexicalScore": round(lexical_score, 4),
+            })
+        return sorted(results, key=lambda item: item["score"], reverse=True)[:top_k]
+
     # ========== 持久化 ==========
 
     def _save(self):
@@ -364,7 +547,16 @@ class RAGService:
         logger.info(f"元数据已保存: {META_PATH} ({len(meta)} 条)")
 
     def load(self) -> bool:
-        """从磁盘加载索引。成功返回 True，失败或无文件返回 False。"""
+        """加载配置的索引后端。成功返回 True，空索引或无文件返回 False。"""
+        if self.backend == "qdrant":
+            metadata = self.qdrant_store.get_index_metadata()
+            self._qdrant_collection_name = metadata["collection_name"]
+            self._apply_qdrant_snapshot(
+                self.qdrant_store.load_chunks(),
+                metadata["index_version"],
+            )
+            return int(metadata["total_chunks"]) > 0
+
         if not os.path.exists(INDEX_PATH) or not os.path.exists(META_PATH):
             logger.info("未找到持久化索引文件，将从空索引开始")
             return False
@@ -402,23 +594,64 @@ class RAGService:
             self.chunks = []
             return False
 
+    def refresh_shared_index_state(self) -> Dict:
+        """Refresh this replica's index metadata when another replica published an update."""
+        if self.backend != "qdrant":
+            return {
+                "collection_name": None,
+                "index_version": self.index_version,
+                "total_chunks": len(self.chunks),
+                "total_articles": len({chunk.article_id for chunk in self.chunks}),
+            }
+        metadata = self.qdrant_store.get_index_metadata()
+        if (
+            metadata["index_version"] != self.index_version
+            or metadata["collection_name"] != self._qdrant_collection_name
+        ):
+            self._qdrant_collection_name = metadata["collection_name"]
+            self._apply_qdrant_snapshot(
+                self.qdrant_store.load_chunks(),
+                metadata["index_version"],
+            )
+        return metadata
+
+    def close(self):
+        if self.qdrant_store is not None:
+            self.qdrant_store.close()
+
     # ========== 状态查询 ==========
 
     @property
     def is_ready(self) -> bool:
+        if self.backend == "qdrant":
+            return bool(self.qdrant_store.get_stats()["ready"])
         return self.index is not None and self.index.ntotal > 0
 
     @property
     def total_vectors(self) -> int:
+        if self.backend == "qdrant":
+            return int(self.qdrant_store.get_stats()["total_vectors"])
         return self.index.ntotal if self.index else 0
 
     @property
     def total_articles(self) -> int:
+        if self.backend == "qdrant":
+            return int(self.qdrant_store.get_stats()["total_articles"])
         article_ids = set(c.article_id for c in self.chunks)
         return len(article_ids)
 
     def get_stats(self) -> Dict:
+        if self.backend == "qdrant":
+            stats = self.qdrant_store.get_stats()
+            self.refresh_shared_index_state()
+            return {
+                **stats,
+                "backend": "qdrant",
+                "model": self.model_name,
+                "index_path": None,
+            }
         return {
+            "backend": "faiss",
             "ready": self.is_ready,
             "total_vectors": self.total_vectors,
             "total_chunks": len(self.chunks),

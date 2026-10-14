@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import hmac
+import asyncio
 from typing import Any, Dict, List, Optional
 from contextlib import asynccontextmanager
 
@@ -29,21 +30,28 @@ logger = logging.getLogger(__name__)
 # ========== 启动时加载 FAISS 索引 ==========
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """启动时尝试从磁盘加载已有索引"""
-    logger.info("正在加载 FAISS 索引...")
+    """Load the configured RAG backend and shared graph checkpoint store."""
+    logger.info("正在加载 %s RAG 索引...", rag_service.backend)
     loaded = rag_service.load()
     if loaded:
-        logger.info(f"FAISS 索引加载成功: {rag_service.total_vectors} 个向量, {rag_service.total_articles} 篇文章")
+        logger.info(
+            "RAG 索引加载成功: %s 个向量, %s 篇文章",
+            rag_service.total_vectors,
+            rag_service.total_articles,
+        )
     else:
-        logger.info("未找到已有索引，等待 Spring Boot 推送知识库数据进行重建")
+        logger.info("未找到已有索引，等待知识库数据同步")
     if config.AGENT_CHECKPOINT_BACKEND == "sqlite":
         os.makedirs(os.path.dirname(config.AGENT_CHECKPOINT_DB) or ".", exist_ok=True)
-    async with open_checkpointer() as checkpointer:
-        agent_chat_service.configure_checkpointer(checkpointer)
-        try:
-            yield
-        finally:
-            agent_chat_service.clear_checkpointer()
+    try:
+        async with open_checkpointer() as checkpointer:
+            agent_chat_service.configure_checkpointer(checkpointer)
+            try:
+                yield
+            finally:
+                agent_chat_service.clear_checkpointer()
+    finally:
+        rag_service.close()
 
 
 app = FastAPI(title="AI Mental Health Agent", version="1.0.0", lifespan=lifespan)
@@ -171,10 +179,10 @@ async def agent_diary_analyze(request: DiaryRequest, _authorized: None = Depends
 
 @app.post("/api/agent/rag/rebuild")
 async def rag_rebuild(request: RAGRebuildRequest, _authorized: None = Depends(require_internal_token)):
-    """全量重建 FAISS 索引。Spring Boot 在知识库文章增删改后调用。"""
+    """全量重建知识索引。"""
     articles = [a.model_dump() for a in request.articles]
     try:
-        total = rag_service.rebuild_index(articles)
+        total = await asyncio.to_thread(rag_service.rebuild_index, articles)
         logger.info(f"RAG 索引重建完成: {total} 个向量")
         return {"code": "200", "data": {"total_vectors": total, "total_articles": len(articles)}}
     except Exception as e:
@@ -186,8 +194,13 @@ async def rag_rebuild(request: RAGRebuildRequest, _authorized: None = Depends(re
 async def rag_article_add(article: RAGArticle, _authorized: None = Depends(require_internal_token)):
     """增量添加单篇文章到索引"""
     try:
-        rag_service.add_article(article.id, article.title, article.content)
-        return {"code": "200", "data": rag_service.get_stats()}
+        await asyncio.to_thread(
+            rag_service.add_article,
+            article.id,
+            article.title,
+            article.content,
+        )
+        return {"code": "200", "data": await asyncio.to_thread(rag_service.get_stats)}
     except Exception as e:
         logger.error(f"RAG 添加文章失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -197,8 +210,8 @@ async def rag_article_add(article: RAGArticle, _authorized: None = Depends(requi
 async def rag_article_remove(article_id: int, _authorized: None = Depends(require_internal_token)):
     """按 ID 删除文章的所有分块"""
     try:
-        rag_service.remove_article(article_id)
-        return {"code": "200", "data": rag_service.get_stats()}
+        await asyncio.to_thread(rag_service.remove_article, article_id)
+        return {"code": "200", "data": await asyncio.to_thread(rag_service.get_stats)}
     except Exception as e:
         logger.error(f"RAG 删除文章失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -209,8 +222,13 @@ async def rag_article_update(article_id: int, article: RAGArticle,
                              _authorized: None = Depends(require_internal_token)):
     """更新单篇文章（先删后加）"""
     try:
-        rag_service.update_article(article_id, article.title, article.content)
-        return {"code": "200", "data": rag_service.get_stats()}
+        await asyncio.to_thread(
+            rag_service.update_article,
+            article_id,
+            article.title,
+            article.content,
+        )
+        return {"code": "200", "data": await asyncio.to_thread(rag_service.get_stats)}
     except Exception as e:
         logger.error(f"RAG 更新文章失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -219,13 +237,13 @@ async def rag_article_update(article_id: int, article: RAGArticle,
 @app.get("/api/agent/rag/stats")
 async def rag_stats(_authorized: None = Depends(require_internal_token)):
     """查询索引状态"""
-    return {"code": "200", "data": rag_service.get_stats()}
+    return {"code": "200", "data": await asyncio.to_thread(rag_service.get_stats)}
 
 
 @app.post("/api/agent/rag/search")
 async def rag_search(query: str, top_k: int = 3, _authorized: None = Depends(require_internal_token)):
     """直接语义检索（调试用，生产由 function calling 调用）"""
-    results = rag_service.search(query, top_k)
+    results = await asyncio.to_thread(rag_service.search, query, top_k)
     return {"code": "200", "data": results}
 
 
