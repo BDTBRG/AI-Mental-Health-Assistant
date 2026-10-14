@@ -231,4 +231,10 @@ async def rag_search(query: str, top_k: int = 3, _authorized: None = Depends(req
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app:app", host=config.AGENT_HOST, port=config.AGENT_PORT, reload=True, log_level="info")
+    uvicorn.run(
+        "app:app",
+        host=config.AGENT_HOST,
+        port=config.AGENT_PORT,
+        reload=config.AGENT_RELOAD,
+        log_level="info",
+    )

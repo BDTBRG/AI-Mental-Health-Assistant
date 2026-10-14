@@ -3,18 +3,18 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# 清除系统代理环境变量，避免 HTTP 请求被指向不存在的本地代理 (127.0.0.1:9)
-# 否则所有 langchain_openai / httpx 请求都会走代理导致 Connection error
-for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy'):
-    os.environ.pop(key, None)
-
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
 
-AGENT_HOST = "0.0.0.0"
-AGENT_PORT = 5000
-JAVA_BACKEND_URL = "http://localhost:8080"
+AGENT_HOST = os.getenv("AGENT_HOST", "0.0.0.0")
+try:
+    AGENT_PORT = int(os.getenv("AGENT_PORT", "5000"))
+except ValueError as error:
+    raise ValueError("AGENT_PORT must be between 1 and 65535") from error
+if not 1 <= AGENT_PORT <= 65535:
+    raise ValueError("AGENT_PORT must be between 1 and 65535")
+AGENT_RELOAD = os.getenv("AGENT_RELOAD", "false").strip().lower() in {"1", "true", "yes", "on"}
 AGENT_CHECKPOINT_DB = os.getenv(
     "AGENT_CHECKPOINT_DB",
     os.path.join(os.path.dirname(__file__), "data", "agent_checkpoints.sqlite"),
