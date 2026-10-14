@@ -22,7 +22,11 @@
 				<router-link to="/knowledge" class="nav-link"
 					>知识库</router-link
 				>
-				<el-button @click="handleLogout" class="logout-btn" v-if="isLoggedIn"
+				<el-button
+					@click="handleLogout"
+					class="logout-btn"
+					:loading="isLoggingOut"
+					v-if="isLoggedIn"
 					>退出登录</el-button
 				>
 				<template v-else>
@@ -46,18 +50,30 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { logout } from '@/api/admin'
+import { ElMessage } from 'element-plus'
+import { finishLogout } from '@/utils/logout'
 
 const iconUrl = new URL('@/assets/机器人.png', import.meta.url).href
+const router = useRouter()
 
 const isLoggedIn = ref<boolean>(false)
+const isLoggingOut = ref(false)
 
-const handleLogout = async() => {
-	await logout()
-	localStorage.removeItem('token')
-	localStorage.removeItem('userInfo')
-	isLoggedIn.value = false
-	location.href = '/auth/login'
+const handleLogout = async () => {
+	if (isLoggingOut.value) return
+	isLoggingOut.value = true
+	try {
+		const serverRevoked = await finishLogout(logout)
+		if (!serverRevoked) {
+			ElMessage.warning('本地登录状态已清理，但服务端会话撤销尚未确认')
+		}
+		isLoggedIn.value = false
+		await router.replace('/auth/login')
+	} finally {
+		isLoggingOut.value = false
+	}
 }
 
 onMounted(() => {

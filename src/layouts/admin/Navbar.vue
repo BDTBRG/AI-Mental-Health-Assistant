@@ -26,28 +26,33 @@
 </template>
 
 <script setup lang="ts">
-import { ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAdminStore } from '@/stores/appStore'
 import userImg from '@/assets/user.jpg'
 import { useRoute, useRouter } from 'vue-router'
 import { logout } from '@/api/admin'
+import { finishLogout } from '@/utils/logout'
 
 const route = useRoute()
 const router = useRouter()
 
-const handleCommand = (command: string) => {
-	if (command === 'layout') {
-		ElMessageBox.confirm('确定要退出登录吗？', '提示', {
+const handleCommand = async (command: string) => {
+	if (command !== 'layout') return
+	try {
+		await ElMessageBox.confirm('确定要退出登录吗？', '提示', {
 			confirmButtonText: '确定',
 			cancelButtonText: '取消',
 			type: 'warning',
-		}).then(async () => {
-			await logout()
-			localStorage.removeItem('token')
-			localStorage.removeItem('userInfo')
-			router.push('/auth/login')
 		})
+	} catch {
+		return
 	}
+
+	const serverRevoked = await finishLogout(logout)
+	if (!serverRevoked) {
+		ElMessage.warning('本地登录状态已清理，但服务端会话撤销尚未确认')
+	}
+	await router.replace('/auth/login')
 }
 
 const handleCollapse = () => {
