@@ -18,6 +18,13 @@ spring:
       max-file-size: 5MB
       max-request-size: 6MB
 
+app:
+  outbox:
+    pending-replay-interval-ms: ${APP_OUTBOX_PENDING_REPLAY_INTERVAL_MS:15000}
+    pending-reclaim-min-idle: ${APP_OUTBOX_PENDING_RECLAIM_MIN_IDLE:PT3M}
+    pending-reclaim-batch-size: ${APP_OUTBOX_PENDING_RECLAIM_BATCH_SIZE:10}
+    pending-reclaim-interval-ms: ${APP_OUTBOX_PENDING_RECLAIM_INTERVAL_MS:30000}
+
 server:
   port: 8080
 

@@ -4,8 +4,11 @@ import com.amha.agent.RealChatAgent;
 import com.amha.entity.KnowledgeArticle;
 import com.amha.entity.KnowledgeIndexOutbox;
 import com.amha.mapper.KnowledgeArticleMapper;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.connection.stream.Consumer;
@@ -22,6 +25,7 @@ import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.Map;
+import java.util.UUID;
 
 @Slf4j
 @Component
@@ -30,13 +34,19 @@ import java.util.Map;
 public class KnowledgeIndexOutboxWorker {
     private static final String STREAM_KEY = "amha:outbox:knowledge-index";
     private static final String CONSUMER_GROUP = "knowledge-index-workers";
-    private static final String CONSUMER_NAME = "knowledge-index-worker";
+    private final String consumerName = "knowledge-index-worker-" + UUID.randomUUID();
 
     private final KnowledgeIndexOutboxService outboxService;
     private final KnowledgeArticleMapper articleMapper;
     private final RealChatAgent realChatAgent;
     private final StringRedisTemplate redisTemplate;
     private final RedisConnectionFactory connectionFactory;
+
+    private final OutboxPendingReclaimer pendingReclaimer = new OutboxPendingReclaimer("knowledge-index");
+    @Value("${app.outbox.pending-reclaim-min-idle:PT3M}")
+    private Duration pendingReclaimMinIdle = Duration.ofMinutes(3);
+    @Value("${app.outbox.pending-reclaim-batch-size:10}")
+    private int pendingReclaimBatchSize = 10;
 
     private volatile StreamMessageListenerContainer<String, MapRecord<String, String, String>> container;
     private volatile Subscription subscription;
@@ -73,10 +83,7 @@ public class KnowledgeIndexOutboxWorker {
                     StreamMessageListenerContainer.StreamMessageListenerContainerOptions.builder()
                             .pollTimeout(Duration.ofSeconds(1)).batchSize(10).build();
             container = StreamMessageListenerContainer.create(connectionFactory, options);
-            subscription = container.receive(
-                    Consumer.from(CONSUMER_GROUP, CONSUMER_NAME),
-                    StreamOffset.create(STREAM_KEY, ReadOffset.lastConsumed()), this::onMessage);
-            container.start();
+            startListening(container);
         } catch (Exception error) {
             log.warn("Redis Stream consumer for knowledge indexing is not ready; initialization will retry");
         }
@@ -86,14 +93,71 @@ public class KnowledgeIndexOutboxWorker {
     public void replayOwnPendingEntries() {
         if (subscription == null || !subscription.isActive()) return;
         try {
+            int availableSlots = pendingReclaimer.availableSlots(10);
+            if (availableSlots == 0) return;
             StreamOperations<String, String, String> operations = redisTemplate.opsForStream();
-            var pending = operations.read(Consumer.from(CONSUMER_GROUP, CONSUMER_NAME),
-                    org.springframework.data.redis.connection.stream.StreamReadOptions.empty().count(10),
+            var pending = operations.read(consumerIdentity(),
+                    org.springframework.data.redis.connection.stream.StreamReadOptions.empty().count(availableSlots),
                     StreamOffset.create(STREAM_KEY, ReadOffset.from("0-0")));
-            if (pending != null) pending.forEach(this::onMessage);
+            if (pending != null) pendingReclaimer.submitPending(pending, availableSlots, this::onMessage);
         } catch (Exception error) {
             log.warn("Unable to replay pending knowledge index stream entries");
         }
+    }
+
+    /** Recover only deliveries that have remained idle longer than the processing lease. */
+    @Scheduled(fixedDelayString = "${app.outbox.pending-reclaim-interval-ms:30000}")
+    public void reclaimStalePendingEntries() {
+        if (subscription == null || !subscription.isActive()) return;
+        try {
+            int reclaimed = pendingReclaimer.reclaim(STREAM_KEY, CONSUMER_GROUP, consumerName,
+                    redisTemplate.opsForStream(), pendingReclaimMinIdle, pendingReclaimBatchSize,
+                    this::onMessage);
+            if (reclaimed > 0) {
+                log.info("Reclaimed {} stale knowledge index stream entries", reclaimed);
+            }
+        } catch (Exception error) {
+            log.warn("Unable to reclaim stale knowledge index stream entries", error);
+        }
+    }
+
+    @PostConstruct
+    void validatePendingReclaimConfiguration() {
+        if (pendingReclaimMinIdle.compareTo(Duration.ofMinutes(3)) < 0) {
+            throw new IllegalStateException("app.outbox.pending-reclaim-min-idle must be at least PT3M");
+        }
+        if (pendingReclaimBatchSize < 1 || pendingReclaimBatchSize > 100) {
+            throw new IllegalStateException("app.outbox.pending-reclaim-batch-size must be between 1 and 100");
+        }
+    }
+
+    @PreDestroy
+    void stopListenerContainer() {
+        StreamMessageListenerContainer<String, MapRecord<String, String, String>> current = container;
+        if (current != null) {
+            try {
+                if (current.isRunning()) current.stop();
+            } catch (Exception error) {
+                log.warn("Unable to stop the knowledge index stream listener cleanly", error);
+            }
+        }
+        subscription = null;
+        pendingReclaimer.close();
+    }
+
+    String consumerName() {
+        return consumerName;
+    }
+
+    Consumer consumerIdentity() {
+        return Consumer.from(CONSUMER_GROUP, consumerName);
+    }
+
+    void startListening(StreamMessageListenerContainer<String, MapRecord<String, String, String>> listenerContainer) {
+        container = listenerContainer;
+        subscription = listenerContainer.receive(consumerIdentity(),
+                StreamOffset.create(STREAM_KEY, ReadOffset.lastConsumed()), this::onMessage);
+        listenerContainer.start();
     }
 
     private synchronized void onMessage(MapRecord<String, String, String> record) {

@@ -3,8 +3,11 @@ package com.amha.service.impl;
 import com.amha.agent.RealChatAgent;
 import com.amha.entity.EmotionAnalysisOutbox;
 import com.amha.entity.EmotionDiary;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
 import org.springframework.data.redis.connection.stream.Consumer;
@@ -37,7 +40,12 @@ public class EmotionAnalysisOutboxWorker {
     private final StringRedisTemplate redisTemplate;
     private final RedisConnectionFactory connectionFactory;
 
-    private static final String CONSUMER_NAME = "emotion-analysis-worker";
+    private final String consumerName = "emotion-analysis-worker-" + UUID.randomUUID();
+    private final OutboxPendingReclaimer pendingReclaimer = new OutboxPendingReclaimer("emotion-analysis");
+    @Value("${app.outbox.pending-reclaim-min-idle:PT3M}")
+    private Duration pendingReclaimMinIdle = Duration.ofMinutes(3);
+    @Value("${app.outbox.pending-reclaim-batch-size:10}")
+    private int pendingReclaimBatchSize = 10;
     private volatile StreamMessageListenerContainer<String, MapRecord<String, String, String>> container;
     private volatile Subscription subscription;
 
@@ -77,11 +85,7 @@ public class EmotionAnalysisOutboxWorker {
                             .batchSize(10)
                             .build();
             container = StreamMessageListenerContainer.create(connectionFactory, options);
-            subscription = container.receive(
-                    Consumer.from(CONSUMER_GROUP, CONSUMER_NAME),
-                    StreamOffset.create(STREAM_KEY, ReadOffset.lastConsumed()),
-                    this::onMessage);
-            container.start();
+            startListening(container);
         } catch (Exception error) {
             log.warn("Redis Stream consumer is not ready; the outbox will retry initialization");
         }
@@ -92,15 +96,72 @@ public class EmotionAnalysisOutboxWorker {
     public void replayOwnPendingEntries() {
         if (subscription == null || !subscription.isActive()) return;
         try {
+            int availableSlots = pendingReclaimer.availableSlots(10);
+            if (availableSlots == 0) return;
             StreamOperations<String, String, String> streamOperations = redisTemplate.opsForStream();
             var pending = streamOperations.read(
-                    Consumer.from(CONSUMER_GROUP, CONSUMER_NAME),
-                    org.springframework.data.redis.connection.stream.StreamReadOptions.empty().count(10),
+                    consumerIdentity(),
+                    org.springframework.data.redis.connection.stream.StreamReadOptions.empty().count(availableSlots),
                     StreamOffset.create(STREAM_KEY, ReadOffset.from("0-0")));
-            if (pending != null) pending.forEach(this::onMessage);
+            if (pending != null) pendingReclaimer.submitPending(pending, availableSlots, this::onMessage);
         } catch (Exception error) {
             log.warn("Unable to replay pending Redis Stream entries");
         }
+    }
+
+    /** Recover only deliveries that have remained idle longer than the processing lease. */
+    @Scheduled(fixedDelayString = "${app.outbox.pending-reclaim-interval-ms:30000}")
+    public void reclaimStalePendingEntries() {
+        if (subscription == null || !subscription.isActive()) return;
+        try {
+            int reclaimed = pendingReclaimer.reclaim(STREAM_KEY, CONSUMER_GROUP, consumerName,
+                    redisTemplate.opsForStream(), pendingReclaimMinIdle, pendingReclaimBatchSize,
+                    this::onMessage);
+            if (reclaimed > 0) {
+                log.info("Reclaimed {} stale emotion analysis stream entries", reclaimed);
+            }
+        } catch (Exception error) {
+            log.warn("Unable to reclaim stale emotion analysis stream entries", error);
+        }
+    }
+
+    @PostConstruct
+    void validatePendingReclaimConfiguration() {
+        if (pendingReclaimMinIdle.compareTo(Duration.ofMinutes(3)) < 0) {
+            throw new IllegalStateException("app.outbox.pending-reclaim-min-idle must be at least PT3M");
+        }
+        if (pendingReclaimBatchSize < 1 || pendingReclaimBatchSize > 100) {
+            throw new IllegalStateException("app.outbox.pending-reclaim-batch-size must be between 1 and 100");
+        }
+    }
+
+    @PreDestroy
+    void stopListenerContainer() {
+        StreamMessageListenerContainer<String, MapRecord<String, String, String>> current = container;
+        if (current != null) {
+            try {
+                if (current.isRunning()) current.stop();
+            } catch (Exception error) {
+                log.warn("Unable to stop the emotion analysis stream listener cleanly", error);
+            }
+        }
+        subscription = null;
+        pendingReclaimer.close();
+    }
+
+    String consumerName() {
+        return consumerName;
+    }
+
+    Consumer consumerIdentity() {
+        return Consumer.from(CONSUMER_GROUP, consumerName);
+    }
+
+    void startListening(StreamMessageListenerContainer<String, MapRecord<String, String, String>> listenerContainer) {
+        container = listenerContainer;
+        subscription = listenerContainer.receive(consumerIdentity(),
+                StreamOffset.create(STREAM_KEY, ReadOffset.lastConsumed()), this::onMessage);
+        listenerContainer.start();
     }
 
     private synchronized void onMessage(MapRecord<String, String, String> record) {
