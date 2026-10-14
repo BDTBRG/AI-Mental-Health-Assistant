@@ -182,13 +182,16 @@ class UserControllerTest {
         LoginRequest login = new LoginRequest();
         login.setUsername("selfadmin");
         login.setPassword("pass123");
-        mockMvc.perform(post("/user/login")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content(objectMapper.writeValueAsString(login)))
+        String selfAdminLoginResponse = mockMvc.perform(post("/user/login")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(objectMapper.writeValueAsString(login)))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.data.roleType").value("USER"));
+                .andExpect(jsonPath("$.data.roleType").value("USER"))
+                .andReturn().getResponse().getContentAsString();
 
-        mockMvc.perform(get("/data-analytics/overview").header("token", token))
+        String selfAdminToken = objectMapper.readTree(selfAdminLoginResponse)
+                .path("data").path("token").asText();
+        mockMvc.perform(get("/data-analytics/overview").header("token", selfAdminToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value("403"));
     }
