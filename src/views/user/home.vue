@@ -10,11 +10,12 @@
 					每个深夜，每个焦虑的时刻，我们都在这里。不必独自承受，让心与心的连接温暖您的每一天
 				</p>
 				<div class="hero-actions">
-					<el-button size="large">开始倾诉，获得陪伴</el-button>
+					<el-button size="large" @click="openConsultation">开始倾诉，获得陪伴</el-button>
 					<el-button
 						size="large"
 						style="border-color: #fff"
 						color="transparent"
+						@click="openEmotionDiary"
 						>记录心情，释放感情</el-button
 					>
 				</div>
@@ -31,11 +32,13 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 
+const router = useRouter()
 const iconUrl = new URL('@/assets/robot-fill.png', import.meta.url).href
 
-onMounted(() => {})
+const openConsultation = () => router.push('/consultation')
+const openEmotionDiary = () => router.push('/emotion-diary')
 </script>
 
 <style scoped lang="scss">

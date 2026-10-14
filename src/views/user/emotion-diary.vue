@@ -37,7 +37,7 @@
 					<MarkdownRenderer :content="aiAnalysisText" :is-ai-message="true" />
 				</div>
 				<div class="analysis-error" v-else>
-					<p>AI分析暂时不可用，请稍后再试。你的日记已经保存成功。</p>
+					<p>{{ aiAnalysisError || 'AI分析暂时不可用，请稍后再试。你的日记已经保存成功。' }}</p>
 				</div>
 			</div>
 
@@ -202,6 +202,7 @@ const submitting = ref(false)
 const showAiResult = ref(false)
 const aiResultLoading = ref(false)
 const aiAnalysisText = ref('')
+const aiAnalysisError = ref('')
 
 const diaryHistory = ref<EmotionDiaryVO[]>([])
 
@@ -250,18 +251,24 @@ const selectEmotion = (emotionName: string) => {
 	diaryForm.dominantEmotion = emotionName
 }
 
-const resetDiaryForm = () => {
+const clearDiaryFields = () => {
 	diaryForm.diaryContent = ''
 	diaryForm.dominantEmotion = ''
 	diaryForm.emotionTriggers = ''
 	diaryForm.moodScore = 0
 	diaryForm.sleepQuality = null
 	diaryForm.stressLevel = null
+}
+
+const resetDiaryForm = () => {
+	clearDiaryFields()
 	showAiResult.value = false
 	aiAnalysisText.value = ''
+	aiAnalysisError.value = ''
 }
 
 const submitDiaryEntry = async () => {
+	if (submitting.value) return
 	if (!diaryForm.moodScore) { ElMessage.error('请选择情绪评分'); return }
 	if (!diaryForm.dominantEmotion) { ElMessage.error('请选择主要情绪'); return }
 	if (!diaryForm.emotionTriggers) { ElMessage.error('请填写情绪触发因素'); return }
@@ -273,45 +280,63 @@ const submitDiaryEntry = async () => {
 	showAiResult.value = true
 	aiResultLoading.value = true
 	aiAnalysisText.value = ''
+	aiAnalysisError.value = ''
 
 	try {
 		await submitEmotionDiary(diaryForm)
-		ElMessage.success('情绪日记提交成功，AI正在分析中...')
-
-		// 轮询等待AI分析完成（最多等待15秒）
-		let attempts = 0
-		const maxAttempts = 5
-		const pollInterval = 3000
-
-		while (attempts < maxAttempts) {
-			await new Promise(resolve => setTimeout(resolve, pollInterval))
-			const diaries = await getMyDiaries()
-			diaryHistory.value = diaries
-			// 找到最新的日记
-			if (diaries.length > 0) {
-				const latest = diaries[0]
-				if (latest.hasAiEmotionAnalysis && latest.aiEmotionAnalysis) {
-					aiAnalysisText.value = latest.aiEmotionAnalysis
-					aiResultLoading.value = false
-					break
-				} else if (latest.aiAnalysisStatus === 'FAILED') {
-					aiResultLoading.value = false
-					ElMessage.warning('AI分析暂不可用，请稍后再试')
-					break
-				}
-			}
-			attempts++
-		}
-		if (aiResultLoading.value) {
-			aiResultLoading.value = false
-			// 可能分析还在进行中
-			ElMessage.info('AI分析可能需要一些时间，请稍后在历史记录中查看')
-		}
-		resetDiaryForm()
-	} catch (error) {
+	} catch {
 		ElMessage.error('提交失败，请稍后再试')
 		showAiResult.value = false
+		aiResultLoading.value = false
+		submitting.value = false
+		return
+	}
+
+	ElMessage.success('情绪日记提交成功，AI正在分析中...')
+	clearDiaryFields()
+
+	try {
+		// 保存成功后再读取分析状态，读取失败不能误报成日记提交失败。
+		const maxAttempts = 5
+		const pollInterval = 3000
+		let completed = false
+
+		for (let attempts = 0; attempts < maxAttempts; attempts++) {
+			await new Promise(resolve => setTimeout(resolve, pollInterval))
+			let diaries: EmotionDiaryVO[]
+			try {
+				diaries = await getMyDiaries()
+				diaryHistory.value = diaries
+			} catch {
+				aiAnalysisError.value = '日记已保存，但暂时无法获取分析进度。请稍后刷新历史记录。'
+				ElMessage.warning('日记已保存，但分析进度暂时无法获取')
+				completed = true
+				break
+			}
+
+			const latest = diaries[0]
+			if (latest?.hasAiEmotionAnalysis && latest.aiEmotionAnalysis) {
+				aiAnalysisText.value = latest.aiEmotionAnalysis
+				completed = true
+				break
+			}
+			if (latest?.aiAnalysisStatus === 'FAILED') {
+				aiAnalysisError.value = '日记已保存，但 AI 分析失败。你可以稍后在历史记录中查看。'
+				ElMessage.warning('AI分析暂不可用，请稍后再试')
+				completed = true
+				break
+			}
+		}
+
+		if (!completed) {
+			aiAnalysisError.value = '日记已保存，AI分析仍在处理中。请稍后在历史记录中查看。'
+			ElMessage.info('AI分析仍在处理中，请稍后在历史记录中查看')
+		}
+	} catch {
+		aiAnalysisError.value = '日记已保存，但分析状态暂时无法确认。请稍后在历史记录中查看。'
+		ElMessage.warning('日记已保存，但分析状态暂时无法确认')
 	} finally {
+		aiResultLoading.value = false
 		submitting.value = false
 	}
 }

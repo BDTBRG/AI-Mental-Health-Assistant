@@ -71,6 +71,7 @@
 						type="primary"
 						size="large"
 						class="btn"
+						:loading="registering"
 						@click="submitForm(formRef)"
 						>注册</el-button
 					>
@@ -124,20 +125,27 @@ const rules: FormRules<RegisterFormQuery> = {
 }
 
 const formRef = ref<FormInstance>()
+const registering = ref(false)
 const submitForm = async (formEl: FormInstance | undefined) => {
-	if (!formEl) return
-	formEl.validate(async _ => {
+	if (!formEl || registering.value) return
+	registering.value = true
+	try {
+		const valid = await formEl.validate().catch(() => false)
+		if (!valid) return
+
 		const data = await register(formData)
 		if (!data) return
 		if (data.id) {
 			ElMessage.success('注册成功')
-			setTimeout(() => {
-				router.push('/auth/login')
-			}, 1000)
+			await router.push('/auth/login')
 		} else {
-			ElMessage.error(data.data.message || '注册失败')
+			ElMessage.error(data.data?.message || '注册失败')
 		}
-	})
+	} catch {
+		// 错误已由请求拦截器统一提示。
+	} finally {
+		registering.value = false
+	}
 }
 </script>
 

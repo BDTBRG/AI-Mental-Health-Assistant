@@ -1,6 +1,7 @@
 ﻿import AuthLayout from '@/layouts/AuthLayout.vue'
 import { createRouter, createWebHistory } from 'vue-router'
 import type { RouteRecordRaw } from 'vue-router'
+import { resolveAuthNavigation } from './authGuard'
 
 const backendRoutes: RouteRecordRaw[] = [
 	{
@@ -24,6 +25,7 @@ const backendRoutes: RouteRecordRaw[] = [
 		name: 'back',
 		redirect: '/back/dashboard',
 		component: () => import('@/layouts/admin/BackendLayout.vue'),
+		meta: { requiresAuth: true, requiresAdmin: true },
 		children: [
 			{
 				path: 'dashboard',
@@ -62,10 +64,12 @@ const frontendRoutes: RouteRecordRaw[] = [
 			{
 				path: 'consultation',
 				component: () => import('@/views/user/consultation.vue'),
+				meta: { requiresAuth: true },
 			},
 			{
 				path: 'emotion-diary',
 				component: () => import('@/views/user/emotion-diary.vue'),
+				meta: { requiresAuth: true },
 			},
 			{
 				path: 'knowledge',
@@ -85,30 +89,12 @@ const router = createRouter({
 	routes: [...backendRoutes, ...frontendRoutes],
 })
 
-router.beforeEach((to, _, next) => {
-	const token = localStorage.getItem('token')
-	if (token) {
-		const userInfo = JSON.parse(localStorage.getItem('userInfo') || '{}')
-		if (userInfo.userType == 2) {
-			if (to.path.startsWith('/back')) {
-				next()
-			} else {
-				next('/back/dashboard')
-			}
-		} else if (userInfo.userType == 1) {
-			if (to.path.startsWith('/back') || to.path.startsWith('/auth')) {
-				next('/')
-			} else {
-				next()
-			}
-		}
-	} else {
-		if (to.path.startsWith('/back')) {
-			next('/auth/login')
-		} else {
-			next()
-		}
-	}
+router.beforeEach(to => {
+	return resolveAuthNavigation({
+		path: to.path,
+		fullPath: to.fullPath,
+		meta: to.meta,
+	}, localStorage)
 })
 
 export default router

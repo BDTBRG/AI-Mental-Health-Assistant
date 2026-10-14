@@ -42,6 +42,7 @@
 						class="btn"
 						size="large"
 						type="primary"
+						:loading="loggingIn"
 						@click="submitForm(formRef)"
 						>登录</el-button
 					>
@@ -64,8 +65,13 @@ import type { FormInstance, FormRules } from 'element-plus'
 import { login } from '@/api/admin'
 import type { LoginForm } from '@/types/admin'
 import { ElMessage } from 'element-plus'
+import { useRoute, useRouter } from 'vue-router'
+import { getPostLoginDestination } from '@/router/authGuard'
 
 const formRef = ref<FormInstance>()
+const route = useRoute()
+const router = useRouter()
+const loggingIn = ref(false)
 
 const formData = reactive<LoginForm>({ username: '', password: '' })
 
@@ -75,30 +81,27 @@ const rules: FormRules<LoginForm> = {
 }
 
 const submitForm = async (formEl: FormInstance | undefined) => {
-	if (!formEl) return
-	await formEl.validate(async (valid, fields) => {
-		if (valid) {
-		login(formData).then(data => {
-			if (!data.token) {
-				return ElMessage.error('登录失败，请检查用户名和密码')
-			}
-			localStorage.setItem('token', data.token)
-			localStorage.setItem('userInfo', JSON.stringify(data.userInfo))
-			ElMessage.success('登录成功')
-			setTimeout(() => {
-				if (data.userInfo.userType === 1) {
-					window.location.href = '/'
-				} else if (data.userInfo.userType === 2) {
-					window.location.href = '/back/dashboard'
-				}
-			}, 1000)
-		}).catch(() => {
-			// 错误已由拦截器统一提示
-			})
-		} else {
-			console.log('error submit!', fields)
+	if (!formEl || loggingIn.value) return
+	loggingIn.value = true
+	try {
+		const valid = await formEl.validate().catch(() => false)
+		if (!valid) return
+
+		const data = await login(formData)
+		if (!data.token || ![1, 2].includes(data.userInfo?.userType)) {
+			ElMessage.error('登录失败，请检查用户名和密码')
+			return
 		}
-	})
+
+		localStorage.setItem('token', data.token)
+		localStorage.setItem('userInfo', JSON.stringify(data.userInfo))
+		ElMessage.success('登录成功')
+		await router.replace(getPostLoginDestination(route.query.redirect, data.userInfo.userType))
+	} catch {
+		// 错误已由请求拦截器统一提示。
+	} finally {
+		loggingIn.value = false
+	}
 }
 </script>
 
