@@ -24,8 +24,13 @@ export function startSession(data: {
 	initialMessage: string
 	sessionTitle: string
 	reviewConsent: boolean
+	clientRequestId: string
 }): Promise<StartSession> {
 	return request.post('/psychological-chat/session/start', data)
+}
+
+export function recoverSessionStart(clientRequestId: string): Promise<StartSession | null> {
+	return request.get(`/psychological-chat/session/start/${encodeURIComponent(clientRequestId)}`)
 }
 
 export function updateReviewConsent(sessionId: string, allowed: boolean): Promise<void> {

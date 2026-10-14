@@ -31,6 +31,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -78,17 +79,57 @@ public class ChatServiceImpl implements ChatService {
     @Override
     @Transactional
     public StartSessionResponse startSession(StartSessionRequest request, Long userId) {
+        if (request == null || userId == null) {
+            throw new BusinessException("400", "会话参数无效");
+        }
+        String startRequestId = request.getClientRequestId();
+        boolean persistFirstTurn = startRequestId != null;
+        if (persistFirstTurn && startRequestId.isBlank()) {
+            throw new BusinessException("400", "clientRequestId 不能为空");
+        }
+        String initialMessage = request.getInitialMessage();
+        if (persistFirstTurn && (initialMessage == null || initialMessage.isBlank()
+                || initialMessage.length() > 500)) {
+            throw new BusinessException("400", "首条消息不能为空且不能超过500字");
+        }
+
+        String startRequestHash = persistFirstTurn ? startRequestHash(request) : null;
+        if (persistFirstTurn) {
+            ConsultationSession existing = sessionMapper.selectByUserAndStartRequestId(userId, startRequestId);
+            if (existing != null) {
+                return existingStartResponse(existing, request, startRequestHash);
+            }
+        }
+
+        LocalDateTime now = LocalDateTime.now();
         ConsultationSession session = new ConsultationSession();
         session.setUserId(userId);
         session.setSessionTitle(request.getSessionTitle());
         session.setStatus("ACTIVE");
-        session.setStartedAt(LocalDateTime.now());
-        session.setMessageCount(0);
+        session.setStartedAt(now);
+        session.setMessageCount(persistFirstTurn ? 1 : 0);
+        if (persistFirstTurn) {
+            session.setStartRequestId(startRequestId);
+            session.setStartRequestHash(startRequestHash);
+            session.setLastMessageContent(initialMessage);
+            session.setLastMessageTime(now);
+        }
         session.setReviewConsent(Boolean.TRUE.equals(request.getReviewConsent()));
         if (Boolean.TRUE.equals(session.getReviewConsent())) {
-            session.setReviewConsentUpdatedAt(LocalDateTime.now());
+            session.setReviewConsentUpdatedAt(now);
         }
-        sessionMapper.insert(session);
+        try {
+            sessionMapper.insert(session);
+        } catch (DuplicateKeyException collision) {
+            if (persistFirstTurn) {
+                ConsultationSession existing = sessionMapper.selectByUserAndStartRequestIdForUpdate(
+                        userId, startRequestId);
+                if (existing != null) {
+                    return existingStartResponse(existing, request, startRequestHash);
+                }
+            }
+            throw collision;
+        }
         if (Boolean.TRUE.equals(session.getReviewConsent())) {
             ConsultationReviewAudit audit = new ConsultationReviewAudit();
             audit.setSessionId(session.getId());
@@ -97,13 +138,76 @@ public class ChatServiceImpl implements ChatService {
             reviewAuditMapper.insert(audit);
         }
 
+        if (persistFirstTurn) {
+            ConsultationMessage firstMessage = new ConsultationMessage();
+            firstMessage.setSessionId(session.getId());
+            firstMessage.setSenderType(1);
+            firstMessage.setContent(initialMessage);
+            messageMapper.insert(firstMessage);
+
+            ConsultationChatTurn firstTurn = new ConsultationChatTurn();
+            firstTurn.setSessionId(session.getId());
+            firstTurn.setClientRequestId(startRequestId);
+            firstTurn.setRequestHash(sha256(initialMessage));
+            firstTurn.setStatus("PENDING");
+            firstTurn.setGenerationToken(UUID.randomUUID().toString());
+            firstTurn.setCreatedAt(now);
+            firstTurn.setUpdatedAt(now);
+            chatTurnMapper.insert(firstTurn);
+        }
+
+        return toStartSessionResponse(session, initialMessage);
+    }
+
+    @Override
+    public StartSessionResponse recoverSessionStart(String clientRequestId, Long userId) {
+        if (clientRequestId == null || clientRequestId.isBlank() || clientRequestId.length() > 64
+                || userId == null) {
+            throw new BusinessException("400", "恢复请求参数无效");
+        }
+        ConsultationSession session = sessionMapper.selectByUserAndStartRequestId(userId, clientRequestId);
+        if (session == null) {
+            return null;
+        }
+        return toStartSessionResponse(session, null);
+    }
+
+    private StartSessionResponse existingStartResponse(ConsultationSession session,
+                                                         StartSessionRequest request,
+                                                         String expectedRequestHash) {
+        if (!expectedRequestHash.equals(session.getStartRequestHash())) {
+            throw new BusinessException("409", "clientRequestId 已用于不同的会话请求");
+        }
+        ConsultationChatTurn firstTurn = chatTurnMapper.selectBySessionAndRequestForUpdate(
+                session.getId(), request.getClientRequestId());
+        if (firstTurn == null || !sha256(request.getInitialMessage()).equals(firstTurn.getRequestHash())) {
+            throw new BusinessException("409", "首轮会话状态不匹配，请使用新的请求标识");
+        }
+        return toStartSessionResponse(session, request.getInitialMessage());
+    }
+
+    private String startRequestHash(StartSessionRequest request) {
+        String message = request.getInitialMessage();
+        String title = request.getSessionTitle();
+        String reviewConsent = Boolean.TRUE.equals(request.getReviewConsent()) ? "1" : "0";
+        return sha256(hashField(message) + hashField(title) + reviewConsent);
+    }
+
+    private String hashField(String value) {
+        return value == null ? "-1:" : value.length() + ":" + value;
+    }
+
+    private StartSessionResponse toStartSessionResponse(ConsultationSession session, String initialMessage) {
+        long startTime = session.getStartedAt() == null ? System.currentTimeMillis()
+                : session.getStartedAt().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli();
         return StartSessionResponse.builder()
                 .sessionId(session.getId())
-                .status("ACTIVE")
-                .startTime(System.currentTimeMillis())
-                .initialMessage(request.getInitialMessage())
-                .messageCount(0)
-                .sessionTitle(request.getSessionTitle())
+                .status(session.getStatus())
+                .startTime(startTime)
+                .initialMessage(initialMessage)
+                .messageCount(session.getMessageCount())
+                .sessionTitle(session.getSessionTitle())
+                .reviewConsent(Boolean.TRUE.equals(session.getReviewConsent()))
                 .build();
     }
 

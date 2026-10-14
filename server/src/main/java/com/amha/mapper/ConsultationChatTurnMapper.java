@@ -17,4 +17,8 @@ public interface ConsultationChatTurnMapper extends BaseMapper<ConsultationChatT
     @Select("SELECT * FROM consultation_chat_turn WHERE session_id = #{sessionId} "
             + "AND status = 'RUNNING' ORDER BY id LIMIT 1 FOR UPDATE")
     ConsultationChatTurn selectRunningBySessionForUpdate(@Param("sessionId") Long sessionId);
+
+    @Select("SELECT * FROM consultation_chat_turn WHERE session_id = #{sessionId} "
+            + "AND status IN ('RUNNING', 'PENDING') ORDER BY id LIMIT 1 FOR UPDATE")
+    ConsultationChatTurn selectActiveBySessionForUpdate(@Param("sessionId") Long sessionId);
 }

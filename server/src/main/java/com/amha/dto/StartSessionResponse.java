@@ -16,4 +16,5 @@ public class StartSessionResponse {
     private String initialMessage;
     private Integer messageCount;
     private String sessionTitle;
+    private Boolean reviewConsent;
 }

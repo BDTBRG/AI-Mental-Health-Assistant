@@ -9,6 +9,7 @@ import java.util.Map;
 
 public interface ChatService {
     StartSessionResponse startSession(StartSessionRequest request, Long userId);
+    StartSessionResponse recoverSessionStart(String clientRequestId, Long userId);
     PageResult<SessionVO> getSessionPage(SessionPageQuery query, Long userId);
     void deleteSession(Long sessionId, Long userId);
     List<ConsultationMessageVO> getSessionMessages(Long sessionId, Long userId, Integer userType);

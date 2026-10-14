@@ -18,6 +18,8 @@ public class ConsultationSession {
     private Integer messageCount;
     private String lastMessageContent;
     private LocalDateTime lastMessageTime;
+    private String startRequestId;
+    private String startRequestHash;
     private Boolean reviewConsent;
     private LocalDateTime reviewConsentUpdatedAt;
     private String reviewStatus;

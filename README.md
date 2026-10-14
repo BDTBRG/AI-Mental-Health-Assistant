@@ -81,7 +81,7 @@
 
     mysql -u root -p < server/src/main/resources/db/init.sql
 
-已有数据库按顺序应用 upgrade_v2 至 upgrade_v10 的脚本；先备份并核对当前 schema。升级脚本没有在本任务中应用到生产数据库。
+已有数据库先备份并核对当前 schema，再按版本顺序应用 upgrade_v2 至 upgrade_v10，最后执行 `server/src/main/resources/db/upgrade_v11_idempotent_session_start.sql`。必须在部署依赖新会话恢复字段的服务版本前完成 v11；该迁移增加首轮请求幂等字段和唯一索引，可重复执行。升级脚本没有在本任务中应用到生产数据库。
 
 ### 2. 启动 Agent
 

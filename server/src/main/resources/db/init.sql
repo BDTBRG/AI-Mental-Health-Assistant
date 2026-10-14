@@ -74,6 +74,8 @@ CREATE TABLE IF NOT EXISTS `consultation_session` (
     `message_count` INT DEFAULT 0,
     `last_message_content` VARCHAR(1000) DEFAULT NULL,
     `last_message_time` DATETIME DEFAULT NULL,
+    `start_request_id` VARCHAR(64) DEFAULT NULL,
+    `start_request_hash` CHAR(64) DEFAULT NULL,
     `review_consent` TINYINT NOT NULL DEFAULT 0,
     `review_consent_updated_at` DATETIME DEFAULT NULL,
     `review_status` VARCHAR(20) NOT NULL DEFAULT 'NONE',
@@ -84,7 +86,8 @@ CREATE TABLE IF NOT EXISTS `consultation_session` (
     `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
-    KEY `idx_user_id` (`user_id`)
+    KEY `idx_user_id` (`user_id`),
+    UNIQUE KEY `uk_session_start_request` (`user_id`, `start_request_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS `consultation_message` (

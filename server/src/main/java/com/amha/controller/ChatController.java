@@ -22,10 +22,17 @@ public class ChatController {
     private final ChatService chatService;
 
     @PostMapping("/session/start")
-    public Result<StartSessionResponse> startSession(@RequestBody StartSessionRequest request,
+    public Result<StartSessionResponse> startSession(@Valid @RequestBody StartSessionRequest request,
                                                       HttpServletRequest httpRequest) {
         Long userId = (Long) httpRequest.getAttribute("userId");
         return Result.success(chatService.startSession(request, userId));
+    }
+
+    @GetMapping("/session/start/{clientRequestId}")
+    public Result<StartSessionResponse> recoverSessionStart(@PathVariable String clientRequestId,
+                                                             HttpServletRequest httpRequest) {
+        Long userId = (Long) httpRequest.getAttribute("userId");
+        return Result.success(chatService.recoverSessionStart(clientRequestId, userId));
     }
 
     @GetMapping("/sessions")

@@ -21,6 +21,11 @@ import java.util.Map;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HexFormat;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import reactor.core.publisher.Flux;
 
@@ -800,6 +805,189 @@ class ChatControllerTest {
             Assertions.assertEquals("PENDING", jdbcTemplate.queryForObject(
                     "SELECT status FROM agent_checkpoint_purge_outbox WHERE id = ?", String.class, purgeTaskId));
         }
+    }
+
+    @Test
+    @Order(19)
+    @DisplayName("首轮会话创建原子保存用户消息并对相同请求幂等")
+    void firstTurnSessionStartIsAtomicAndIdempotent() throws Exception {
+        String clientRequestId = "start-" + System.nanoTime();
+        String message = "创建会话成功后即使页面刷新也应保留首条消息";
+        String body = idempotentStartBody(message, "首轮恢复测试", clientRequestId);
+
+        String firstResponse = mockMvc.perform(post("/psychological-chat/session/start")
+                        .header("token", userToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("200"))
+                .andExpect(jsonPath("$.data.messageCount").value(1))
+                .andReturn().getResponse().getContentAsString();
+        long firstSessionId = objectMapper.readTree(firstResponse).path("data").path("sessionId").asLong();
+
+        String retryResponse = mockMvc.perform(post("/psychological-chat/session/start")
+                        .header("token", userToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.sessionId").value(firstSessionId))
+                .andReturn().getResponse().getContentAsString();
+
+        Assertions.assertEquals(firstSessionId,
+                objectMapper.readTree(retryResponse).path("data").path("sessionId").asLong());
+        Assertions.assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM consultation_session WHERE user_id = "
+                        + "(SELECT user_id FROM consultation_session WHERE id = ?) AND start_request_id = ?",
+                Integer.class, firstSessionId, clientRequestId));
+        Assertions.assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM consultation_message WHERE session_id = ? AND sender_type = 1 AND content = ?",
+                Integer.class, firstSessionId, message));
+        Assertions.assertEquals("PENDING", jdbcTemplate.queryForObject(
+                "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                String.class, firstSessionId, clientRequestId));
+    }
+
+    @Test
+    @Order(20)
+    @DisplayName("同一首轮幂等键不能被不同消息复用")
+    void firstTurnIdempotencyKeyRejectsDifferentMessage() throws Exception {
+        String clientRequestId = "start-conflict-" + System.nanoTime();
+        String original = idempotentStartBody("原始内容", "首轮冲突测试", clientRequestId);
+        mockMvc.perform(post("/psychological-chat/session/start")
+                        .header("token", userToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(original))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("200"));
+
+        String changed = idempotentStartBody("不同内容", "首轮冲突测试", clientRequestId);
+        mockMvc.perform(post("/psychological-chat/session/start")
+                        .header("token", userToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(changed))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("409"));
+
+        Assertions.assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM consultation_session WHERE start_request_id = ?",
+                Integer.class, clientRequestId));
+        Assertions.assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM consultation_message WHERE content = ?", Integer.class, "原始内容"));
+    }
+
+    @Test
+    @Order(21)
+    @DisplayName("首轮恢复接口只允许原会话用户读取")
+    void firstTurnRecoveryIsScopedToSessionOwner() throws Exception {
+        String clientRequestId = "start-recover-" + System.nanoTime();
+        String request = idempotentStartBody("需要在刷新后重新连接", "首轮恢复权限测试", clientRequestId);
+        String startResponse = mockMvc.perform(post("/psychological-chat/session/start")
+                        .header("token", userToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(request))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        long sessionId = objectMapper.readTree(startResponse).path("data").path("sessionId").asLong();
+
+        mockMvc.perform(get("/psychological-chat/session/start/{clientRequestId}", clientRequestId)
+                        .header("token", userToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.sessionId").value(sessionId));
+
+        mockMvc.perform(get("/psychological-chat/session/start/{clientRequestId}", clientRequestId)
+                        .header("token", otherUserToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("200"))
+                .andExpect(jsonPath("$.data").doesNotExist());
+    }
+
+    @Test
+    @Order(22)
+    @DisplayName("流式请求接管已持久化首轮而不重复写入用户消息")
+    void streamClaimsPendingFirstTurnWithoutDuplicatingMessage() throws Exception {
+        String clientRequestId = "start-stream-" + System.nanoTime();
+        String message = "已随会话一起持久化的首条消息";
+        String startRequest = idempotentStartBody(message, "首轮接管测试", clientRequestId);
+        String startResponse = mockMvc.perform(post("/psychological-chat/session/start")
+                        .header("token", userToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(startRequest))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        long sessionId = objectMapper.readTree(startResponse).path("data").path("sessionId").asLong();
+
+        when(realChatAgent.streamResponse(anyLong(), anyString(), anyList(), anyMap()))
+                .thenReturn(Flux.just("首轮恢复成功"));
+        mockMvc.perform(post("/psychological-chat/stream")
+                        .header("token", userToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "sessionId", String.valueOf(sessionId),
+                                "clientRequestId", clientRequestId,
+                                "userMessage", message)))
+                        .accept(MediaType.TEXT_EVENT_STREAM_VALUE))
+                .andExpect(status().isOk());
+
+        awaitTurnCompletion(sessionId, clientRequestId);
+        Assertions.assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM consultation_message WHERE session_id = ? AND sender_type = 1 AND content = ?",
+                Integer.class, sessionId, message));
+        Assertions.assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM consultation_message WHERE session_id = ? AND sender_type = 2 AND content = ?",
+                Integer.class, sessionId, "首轮恢复成功"));
+        verify(realChatAgent, times(1)).streamResponse(anyLong(), anyString(), anyList(), anyMap());
+    }
+
+    @Test
+    @Order(23)
+    @DisplayName("并发重试首轮创建只产生一个会话和一条用户消息")
+    void concurrentFirstTurnStartsShareOneSession() throws Exception {
+        String clientRequestId = "start-concurrent-" + System.nanoTime();
+        String message = "并发请求也只应持久化一次";
+        String body = idempotentStartBody(message, "并发首轮测试", clientRequestId);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            var request = (java.util.concurrent.Callable<String>) () -> {
+                ready.countDown();
+                if (!start.await(5, TimeUnit.SECONDS)) throw new IllegalStateException("并发请求未启动");
+                return mockMvc.perform(post("/psychological-chat/session/start")
+                                .header("token", userToken)
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content(body))
+                        .andReturn().getResponse().getContentAsString();
+            };
+            Future<String> firstFuture = executor.submit(request);
+            Future<String> secondFuture = executor.submit(request);
+            Assertions.assertTrue(ready.await(5, TimeUnit.SECONDS), "两个请求都应到达屏障");
+            start.countDown();
+            var first = objectMapper.readTree(firstFuture.get(10, TimeUnit.SECONDS));
+            var second = objectMapper.readTree(secondFuture.get(10, TimeUnit.SECONDS));
+            Assertions.assertEquals("200", first.path("code").asText());
+            Assertions.assertEquals("200", second.path("code").asText());
+            long sessionId = first.path("data").path("sessionId").asLong();
+            Assertions.assertEquals(sessionId, second.path("data").path("sessionId").asLong());
+            Assertions.assertEquals(1, jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM consultation_session WHERE start_request_id = ?",
+                    Integer.class, clientRequestId));
+            Assertions.assertEquals(1, jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM consultation_message WHERE session_id = ? AND sender_type = 1",
+                    Integer.class, sessionId));
+            Assertions.assertEquals(1, jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                    Integer.class, sessionId, clientRequestId));
+        } finally {
+            start.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    private String idempotentStartBody(String message, String title, String clientRequestId) throws Exception {
+        return objectMapper.writeValueAsString(Map.of(
+                "initialMessage", message,
+                "sessionTitle", title,
+                "clientRequestId", clientRequestId));
     }
 
     private String sha256(String value) throws Exception {

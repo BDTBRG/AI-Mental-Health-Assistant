@@ -45,6 +45,14 @@ public class ChatTurnStore {
             if (!requestHash.equals(existing.getRequestHash())) {
                 throw new BusinessException("409", "clientRequestId 已用于不同消息");
             }
+            if ("PENDING".equals(existing.getStatus())) {
+                String generationToken = UUID.randomUUID().toString();
+                existing.setStatus("RUNNING");
+                existing.setGenerationToken(generationToken);
+                existing.setUpdatedAt(LocalDateTime.now());
+                turnMapper.updateById(existing);
+                return new TurnStart(true, generationToken);
+            }
             if ("RUNNING".equals(existing.getStatus()) && existing.getUpdatedAt() != null
                     && !existing.getUpdatedAt().isAfter(LocalDateTime.now().minusMinutes(5))) {
                 Integer maxSequence = eventMapper.selectMaxSequence(sessionId, requestId);
@@ -60,19 +68,19 @@ public class ChatTurnStore {
             return new TurnStart(false, existing.getGenerationToken());
         }
 
-        ConsultationChatTurn runningTurn = turnMapper.selectRunningBySessionForUpdate(sessionId);
-        if (runningTurn != null) {
+        ConsultationChatTurn activeTurn = turnMapper.selectActiveBySessionForUpdate(sessionId);
+        if (activeTurn != null) {
             LocalDateTime now = LocalDateTime.now();
-            if (runningTurn.getUpdatedAt() == null
-                    || runningTurn.getUpdatedAt().isAfter(now.minusMinutes(5))) {
+            if (activeTurn.getUpdatedAt() == null
+                    || activeTurn.getUpdatedAt().isAfter(now.minusMinutes(5))) {
                 throw new BusinessException("409", "上一条回复仍在生成，请稍后重试");
             }
             Integer maxSequence = eventMapper.selectMaxSequence(
-                    sessionId, runningTurn.getClientRequestId());
-            runningTurn.setStatus("FAILED");
-            runningTurn.setUpdatedAt(now);
-            turnMapper.updateById(runningTurn);
-            insertEvent(sessionId, runningTurn.getClientRequestId(),
+                    sessionId, activeTurn.getClientRequestId());
+            activeTurn.setStatus("FAILED");
+            activeTurn.setUpdatedAt(now);
+            turnMapper.updateById(activeTurn);
+            insertEvent(sessionId, activeTurn.getClientRequestId(),
                     (maxSequence == null ? -1 : maxSequence) + 1, "error",
                     "{\"code\":\"500\",\"message\":\"对话服务已中断，请重新发送消息\"}");
         }

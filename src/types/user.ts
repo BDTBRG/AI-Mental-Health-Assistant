@@ -12,13 +12,12 @@ export interface RegisterFormQuery {
 
 // 创建新会话响应数据
 export interface StartSession {
-	expiryTime: number
-	initialMessage: string
+	initialMessage?: string | null
 	messageCount: number
-	sessionId: string
+	sessionId: string | number
 	startTime: number
 	status: string
-	userHash: number
+	sessionTitle?: string
 	reviewConsent?: boolean
 }
 
@@ -59,6 +58,9 @@ export interface Message {
 	contentLength?: number
 	contentPreview?: string
 	isError?: boolean
+	clientRequestId?: string
+	requestContent?: string
+	canReconnect?: boolean
 }
 
 // 会话情绪分析响应数据
