@@ -1,5 +1,6 @@
 package com.amha.service.impl;
 
+import com.amha.common.BusinessException;
 import com.amha.dto.ArticleDetailVO;
 import com.amha.dto.ArticleSaveRequest;
 import com.amha.entity.KnowledgeArticle;
@@ -10,10 +11,13 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class KnowledgeServiceImplSanitizationTest {
@@ -80,6 +84,15 @@ class KnowledgeServiceImplSanitizationTest {
         assertFalse(result.getContent().contains("<script"));
         assertFalse(result.getContent().contains("onerror"));
         assertFalse(result.getContent().contains("javascript:"));
+    }
+
+    @Test
+    void changeArticleStatusRejectsUnsupportedValuesBeforeTouchingArticleOrIndex() {
+        BusinessException error = assertThrows(BusinessException.class,
+                () -> service.changeArticleStatus(11L, 99));
+
+        assertEquals("400", error.getCode());
+        verifyNoInteractions(articleMapper, indexOutboxService);
     }
 
     private ArticleSaveRequest requestWithUnsafeContent() {

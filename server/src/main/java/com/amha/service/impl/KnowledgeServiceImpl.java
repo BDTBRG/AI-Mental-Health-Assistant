@@ -21,6 +21,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 @Service
@@ -194,6 +195,9 @@ public class KnowledgeServiceImpl implements KnowledgeService {
     @Override
     @Transactional
     public void changeArticleStatus(Long id, Integer status) {
+        if (status == null || !Set.of(0, 1, 2).contains(status)) {
+            throw new BusinessException("400", "文章状态无效");
+        }
         KnowledgeArticle article = articleMapper.selectById(id);
         if (article == null) {
             throw new BusinessException("文章不存在");

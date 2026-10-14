@@ -2,6 +2,7 @@ package com.amha.controller;
 
 import com.amha.common.PageResult;
 import com.amha.common.Result;
+import com.amha.common.SessionIdParser;
 import com.amha.dto.*;
 import com.amha.service.ChatService;
 import jakarta.servlet.http.HttpServletRequest;
@@ -110,7 +111,7 @@ public class ChatController {
     @GetMapping("/session/{sessionId}/emotion")
     public Result<Map<String, Object>> getSessionEmotion(@PathVariable String sessionId,
                                                           HttpServletRequest httpRequest) {
-        Long sid = Long.parseLong(sessionId.replace("session_", ""));
+        Long sid = SessionIdParser.parse(sessionId);
         Long userId = (Long) httpRequest.getAttribute("userId");
         Integer userType = (Integer) httpRequest.getAttribute("userType");
         return Result.success(chatService.getSessionEmotion(sid, userId, userType));

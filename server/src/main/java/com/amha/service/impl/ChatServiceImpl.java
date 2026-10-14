@@ -3,6 +3,7 @@ package com.amha.service.impl;
 import com.amha.agent.ChatAgent;
 import com.amha.common.BusinessException;
 import com.amha.common.PageResult;
+import com.amha.common.SessionIdParser;
 import com.amha.dto.*;
 import com.amha.entity.ConsultationMessage;
 import com.amha.entity.ConsultationChatTurn;
@@ -316,7 +317,7 @@ public class ChatServiceImpl implements ChatService {
 
     @Override
     public SseEmitter streamChat(ChatStreamRequest request, Long userId, Long lastEventId) {
-        Long sessionId = Long.parseLong(request.getSessionId());
+        Long sessionId = SessionIdParser.parse(request == null ? null : request.getSessionId());
         ConsultationSession session = sessionMapper.selectById(sessionId);
         if (session == null) {
             throw new BusinessException("会话不存在");
