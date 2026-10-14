@@ -3,7 +3,6 @@ package com.amha.service.impl;
 import com.amha.agent.RealChatAgent;
 import com.amha.entity.EmotionAnalysisOutbox;
 import com.amha.entity.EmotionDiary;
-import com.amha.mapper.EmotionDiaryMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -34,7 +33,6 @@ public class EmotionAnalysisOutboxWorker {
     private static final String CONSUMER_GROUP = "emotion-analysis-workers";
 
     private final EmotionAnalysisOutboxService outboxService;
-    private final EmotionDiaryMapper diaryMapper;
     private final RealChatAgent realChatAgent;
     private final StringRedisTemplate redisTemplate;
     private final RedisConnectionFactory connectionFactory;
@@ -136,9 +134,9 @@ public class EmotionAnalysisOutboxWorker {
         }
     }
 
-    private void processTask(EmotionAnalysisOutbox task) {
+    void processTask(EmotionAnalysisOutbox task) {
         try {
-            EmotionDiary diary = diaryMapper.selectById(task.getDiaryId());
+            EmotionDiary diary = outboxService.loadDiaryForDispatch(task);
             if (diary == null) {
                 outboxService.fail(task, "DIARY_NOT_FOUND");
                 return;

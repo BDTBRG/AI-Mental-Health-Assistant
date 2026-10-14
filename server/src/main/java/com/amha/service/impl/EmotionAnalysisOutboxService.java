@@ -47,6 +47,23 @@ public class EmotionAnalysisOutboxService {
         return task;
     }
 
+    /**
+     * Revalidate the processing lease and read the diary under row locks immediately before
+     * dispatching its sensitive content to the Agent. Diary deletion uses the same lock order
+     * (outbox, then diary), so a deletion that wins this race prevents dispatch. A successful
+     * locked read is the dispatch boundary; a later deletion cannot recall an outbound request.
+     */
+    @Transactional
+    public EmotionDiary loadDiaryForDispatch(EmotionAnalysisOutbox claimedTask) {
+        EmotionAnalysisOutbox currentTask = outboxMapper.selectByIdForUpdate(claimedTask.getId());
+        if (currentTask == null || !"PROCESSING".equals(currentTask.getStatus())
+                || !java.util.Objects.equals(claimedTask.getLeaseToken(), currentTask.getLeaseToken())) {
+            return null;
+        }
+
+        return diaryMapper.selectByIdForUpdate(claimedTask.getDiaryId());
+    }
+
     @Transactional
     public boolean returnToPending(Long taskId, String dispatchToken) {
         LocalDateTime now = LocalDateTime.now();

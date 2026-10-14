@@ -71,9 +71,9 @@ class RAGService:
             self.model = SentenceTransformer(self.model_name)
             logger.info("模型加载完成")
 
-    def _compute_index_version(self) -> str:
+    def _compute_index_version(self, chunks: Optional[List[TextChunk]] = None) -> str:
         digest = hashlib.sha256()
-        for chunk in self.chunks:
+        for chunk in self.chunks if chunks is None else chunks:
             digest.update(str(chunk.article_id).encode("utf-8"))
             digest.update(b"\0")
             digest.update(chunk.article_title.encode("utf-8"))
@@ -209,12 +209,17 @@ class RAGService:
             return
 
         id_array = np.array(ids_to_remove, dtype='int64')
-        self.index.remove_ids(id_array)
+        candidate_index = faiss.clone_index(self.index)
+        candidate_index.remove_ids(id_array)
+        candidate_chunks = [c for c in self.chunks if c.article_id != article_id]
+        candidate_version = self._compute_index_version(candidate_chunks)
 
-        # 更新内存中的 chunks 列表
-        self.chunks = [c for c in self.chunks if c.article_id != article_id]
-        self.index_version = self._compute_index_version()
-        self._save()
+        # Persist the candidate before publishing it in memory. If persistence fails, a retry
+        # in this process still sees the original chunks and can retry the same deletion.
+        self._save_state(candidate_index, candidate_chunks, candidate_version, self._next_chunk_id)
+        self.index = candidate_index
+        self.chunks = candidate_chunks
+        self.index_version = candidate_version
         logger.info(f"文章 {article_id} 删除完成：-{len(ids_to_remove)} 块，索引总量 {self.index.ntotal}")
 
     def update_article(self, article_id: int, title: str, content: str):
@@ -333,9 +338,13 @@ class RAGService:
 
     def _save(self):
         """保存索引到磁盘"""
-        if self.index is not None:
-            faiss.write_index(self.index, INDEX_PATH)
-            logger.info(f"FAISS 索引已保存: {INDEX_PATH} ({self.index.ntotal} 条)")
+        self._save_state(self.index, self.chunks, self.index_version, self._next_chunk_id)
+
+    def _save_state(self, index, chunks: List[TextChunk], index_version: str, next_chunk_id: int):
+        """Persist an explicit snapshot without changing the currently published state."""
+        if index is not None:
+            faiss.write_index(index, INDEX_PATH)
+            logger.info(f"FAISS 索引已保存: {INDEX_PATH} ({index.ntotal} 条)")
 
         # 保存分块元数据
         meta = [{
@@ -345,11 +354,11 @@ class RAGService:
             "content": c.content,
             "char_start": c.char_start,
             "char_end": c.char_end,
-        } for c in self.chunks]
+        } for c in chunks]
         with open(META_PATH, "w", encoding="utf-8") as f:
             json.dump({
-                "next_chunk_id": self._next_chunk_id,
-                "index_version": self.index_version,
+                "next_chunk_id": next_chunk_id,
+                "index_version": index_version,
                 "chunks": meta,
             }, f, ensure_ascii=False, indent=2)
         logger.info(f"元数据已保存: {META_PATH} ({len(meta)} 条)")
