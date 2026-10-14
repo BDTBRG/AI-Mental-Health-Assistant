@@ -3,6 +3,8 @@ package com.amha.service.impl;
 import com.amha.common.BusinessException;
 import com.amha.entity.FileUpload;
 import com.amha.mapper.FileUploadMapper;
+import com.amha.storage.FileObjectStore;
+import com.amha.storage.FileStorageException;
 import com.amha.storage.LocalFileObjectStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -191,6 +193,49 @@ class FileServiceImplTest {
         try (var files = Files.walk(uploadDirectory)) {
             assertEquals(1, files.filter(Files::isRegularFile).count());
         }
+    }
+
+    @Test
+    void compensatesWhenStorageWriteFailsAfterItsOutcomeBecomesUncertain() {
+        FileObjectStore uncertainStore = mock(FileObjectStore.class);
+        when(fileUploadMapper.insert(any(FileUpload.class))).thenReturn(1);
+        doThrow(new FileStorageException("write outcome is uncertain", new IllegalStateException("timeout")))
+                .when(uncertainStore).put(any(), any(), anyLong(), any());
+        FileServiceImpl failingService = new FileServiceImpl(fileUploadMapper, uncertainStore);
+        ReflectionTestUtils.setField(failingService, "allowedExtensions", "png,jpg,jpeg,gif,webp");
+        ReflectionTestUtils.setField(failingService, "maxFileSizeBytes", 5L * 1024 * 1024);
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "cover.png", "image/png", validPng()
+        );
+
+        assertThrows(FileStorageException.class,
+                () -> failingService.uploadFile(file, "ARTICLE", "draft-id", "cover"));
+
+        verify(uncertainStore).delete(any());
+        verify(fileUploadMapper, never()).insert(any(FileUpload.class));
+    }
+
+    @Test
+    void preservesObjectWhenUncertainWriteKeyIsAlreadyReferencedByMetadata() {
+        FileObjectStore uncertainStore = mock(FileObjectStore.class);
+        FileStorageException storageFailure = new FileStorageException(
+                "write outcome is uncertain", new IllegalStateException("timeout")
+        );
+        when(fileUploadMapper.selectOne(any())).thenReturn(new FileUpload());
+        doThrow(storageFailure).when(uncertainStore).put(any(), any(), anyLong(), any());
+        FileServiceImpl failingService = new FileServiceImpl(fileUploadMapper, uncertainStore);
+        ReflectionTestUtils.setField(failingService, "allowedExtensions", "png,jpg,jpeg,gif,webp");
+        ReflectionTestUtils.setField(failingService, "maxFileSizeBytes", 5L * 1024 * 1024);
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "cover.png", "image/png", validPng()
+        );
+
+        FileStorageException thrown = assertThrows(FileStorageException.class,
+                () -> failingService.uploadFile(file, "ARTICLE", "draft-id", "cover"));
+
+        assertSame(storageFailure, thrown);
+        verify(uncertainStore, never()).delete(any());
+        verify(fileUploadMapper, never()).insert(any(FileUpload.class));
     }
 
     private static byte[] validPng() {

@@ -80,8 +80,14 @@ public class FileServiceImpl implements FileService {
         String relativePath = dateDir + "/" + newFilename;
         try (ByteArrayInputStream input = new ByteArrayInputStream(content)) {
             fileObjectStore.put(relativePath, input, content.length, imageMediaType(ext));
+        } catch (RuntimeException e) {
+            compensateFailedObjectWrite(relativePath, e);
+            throw e;
         } catch (IOException e) {
-            throw new FileStorageException("Unable to read upload content for storage", e);
+            FileStorageException storageException =
+                    new FileStorageException("Unable to read upload content for storage", e);
+            compensateFailedObjectWrite(relativePath, storageException);
+            throw storageException;
         }
 
         FileUpload record = new FileUpload();
@@ -173,6 +179,21 @@ public class FileServiceImpl implements FileService {
             log.warn("Unable to determine file metadata commit status for object key {}; preserving object",
                     relativePath, lookupException);
             return true;
+        }
+    }
+
+    private void compensateFailedObjectWrite(String relativePath, RuntimeException storageException) {
+        if (metadataMayExist(relativePath)) {
+            log.warn("Preserving object after an uncertain write because metadata may reference object key {}",
+                    relativePath);
+            return;
+        }
+        try {
+            fileObjectStore.delete(relativePath);
+        } catch (RuntimeException cleanupException) {
+            storageException.addSuppressed(cleanupException);
+            log.warn("Unable to compensate an uncertain file object write; reconcile object key {}",
+                    relativePath, cleanupException);
         }
     }
 
