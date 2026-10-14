@@ -39,7 +39,7 @@
 				<div class="title">正文内容</div>
 				<div
 					class="content-wrapper"
-					v-html="formatContent(articleDetail?.content)"></div>
+					v-html="sanitizeRichHtml(articleDetail?.content)"></div>
 				<div
 					class="tags-content"
 					v-if="
@@ -68,6 +68,7 @@ import type { KnowledgeArticleDetail } from '@/types/user'
 import { getKnowledgeArticleDetail } from '@/api/user'
 import { dayjs } from 'element-plus'
 import { Avatar } from '@element-plus/icons-vue'
+import { sanitizeRichHtml } from '@/utils/sanitizeHtml'
 
 const iconUrl = new URL('@/assets/book.png', import.meta.url).href
 
@@ -80,18 +81,6 @@ const articleDetail = ref<KnowledgeArticleDetail>()
 const getArticleDetail = async () => {
 	const data = await getKnowledgeArticleDetail(props.id)
 	articleDetail.value = data
-}
-
-const formatContent = (content: string | undefined) => {
-	if (!content) return ''
-
-	// 基本的HTML清理和格式化
-	let formatted = content
-		.replace(/\n/g, '<br>')
-		.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-		.replace(/\*(.*?)\*/g, '<em>$1</em>')
-
-	return formatted
 }
 
 onMounted(() => {

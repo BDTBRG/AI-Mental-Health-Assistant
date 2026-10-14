@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import vue from '@vitejs/plugin-vue'
 import AutoImport from 'unplugin-auto-import/vite'
 import Components from 'unplugin-vue-components/vite'
@@ -35,6 +35,16 @@ export default defineConfig({
 				target: 'http://localhost:8080',
 				changeOrigin: true,
 				rewrite: (path) => path.replace(/^\/api/, ''),
+			},
+		},
+	},
+	test: {
+		environment: 'jsdom',
+		include: ['src/**/*.spec.ts'],
+		clearMocks: true,
+		server: {
+			deps: {
+				inline: ['element-plus'],
 			},
 		},
 	},

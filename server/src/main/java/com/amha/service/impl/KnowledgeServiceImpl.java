@@ -10,6 +10,7 @@ import com.amha.entity.KnowledgeCategory;
 import com.amha.mapper.KnowledgeArticleMapper;
 import com.amha.mapper.KnowledgeCategoryMapper;
 import com.amha.service.KnowledgeService;
+import com.amha.security.ArticleHtmlSanitizer;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
@@ -29,6 +30,7 @@ public class KnowledgeServiceImpl implements KnowledgeService {
     private final KnowledgeCategoryMapper categoryMapper;
     private final KnowledgeArticleMapper articleMapper;
     private final KnowledgeIndexOutboxService indexOutboxService;
+    private final ArticleHtmlSanitizer articleHtmlSanitizer;
 
     @Override
     public List<CategoryVO> getCategoryTree() {
@@ -114,7 +116,7 @@ public class KnowledgeServiceImpl implements KnowledgeService {
         KnowledgeArticle article = new KnowledgeArticle();
         article.setCategoryId(request.getCategoryId());
         article.setTitle(request.getTitle());
-        article.setContent(request.getContent());
+        article.setContent(articleHtmlSanitizer.sanitize(request.getContent()));
         article.setSummary(request.getSummary());
         article.setCoverImage(request.getCoverImage());
         article.setTags(request.getTags());
@@ -151,7 +153,7 @@ public class KnowledgeServiceImpl implements KnowledgeService {
                 .categoryName(category != null ? category.getCategoryName() : "")
                 .title(article.getTitle())
                 .summary(article.getSummary())
-                .content(article.getContent())
+                .content(articleHtmlSanitizer.sanitize(article.getContent()))
                 .coverImage(article.getCoverImage())
                 .tags(article.getTags())
                 .tagArray(tagArray)
@@ -176,7 +178,7 @@ public class KnowledgeServiceImpl implements KnowledgeService {
         }
         article.setCategoryId(request.getCategoryId());
         article.setTitle(request.getTitle());
-        article.setContent(request.getContent());
+        article.setContent(articleHtmlSanitizer.sanitize(request.getContent()));
         article.setSummary(request.getSummary());
         article.setCoverImage(request.getCoverImage());
         article.setTags(request.getTags());

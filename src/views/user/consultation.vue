@@ -249,7 +249,7 @@
 								:is-ai-message="true" />
 							<p
 								v-else-if="message.content"
-								v-html="formatMessage(message.content)"></p>
+								class="plain-message">{{ message.content }}</p>
 						</div>
 						<div class="message-time">
 							{{
@@ -792,10 +792,6 @@ const handleDeleteSession = async (sessionId: string) => {
 	await getHistorySessionPage()
 }
 
-const formatMessage = (html: string): string => {
-	return html.replace(/\n/g, '<br>')
-}
-
 const getIntensityClass = (score: number | null): number => {
 	if (score === null) return 0
 	if (score >= 61) return 3
@@ -1335,6 +1331,11 @@ onMounted(() => {
 				.message-content {
 					max-width: 70%;
 					.message-bubble {
+						.plain-message {
+							margin: 0;
+							white-space: pre-wrap;
+							overflow-wrap: anywhere;
+						}
 						background: linear-gradient(
 							135deg,
 							rgba(255, 255, 255, 0.9) 0%,

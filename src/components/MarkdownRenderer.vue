@@ -6,6 +6,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { sanitizeRichHtml } from '@/utils/sanitizeHtml'
 
 const props = defineProps({
 	content: { type: String, required: true },
@@ -63,7 +64,7 @@ const renderedContent = computed(() => {
 	// 清理多余的br标签
 	html = html.replace(/<br><br>/g, '<br>')
 
-	return html
+	return sanitizeRichHtml(html)
 })
 </script>
 

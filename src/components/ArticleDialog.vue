@@ -92,7 +92,7 @@
 		</el-form>
 		<div v-if="btnPreview">
 			<h3>内容预览</h3>
-			<div v-html="formData.content"></div>
+			<div v-html="sanitizeRichHtml(formData.content)"></div>
 		</div>
 		<template #footer>
 			<el-button @click="btnPreview = !btnPreview">{{
@@ -116,6 +116,7 @@ import { ElMessage } from 'element-plus'
 import type { FormInstance } from 'element-plus'
 import { uploadFile, createArticle, updateArticle } from '@/api/admin'
 import { fileBaseUrl } from '@/config'
+import { sanitizeRichHtml } from '@/utils/sanitizeHtml'
 
 const formRef = ref<FormInstance>()
 

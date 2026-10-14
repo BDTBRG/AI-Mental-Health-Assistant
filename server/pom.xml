@@ -94,6 +94,13 @@
             <version>${hutool.version}</version>
         </dependency>
 
+        <!-- OWASP HTML Sanitizer for article content accepted from the rich-text editor -->
+        <dependency>
+            <groupId>com.googlecode.owasp-java-html-sanitizer</groupId>
+            <artifactId>owasp-java-html-sanitizer</artifactId>
+            <version>20260313.1</version>
+        </dependency>
+
         <!-- Lombok -->
         <dependency>
             <groupId>org.projectlombok</groupId>
