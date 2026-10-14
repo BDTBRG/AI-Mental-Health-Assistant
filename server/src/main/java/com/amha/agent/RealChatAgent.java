@@ -3,6 +3,7 @@ package com.amha.agent;
 import com.amha.entity.ConsultationMessage;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.type.TypeReference;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
@@ -192,6 +193,39 @@ public class RealChatAgent implements ChatAgent {
                 .retrieve()
                 .toBodilessEntity()
                 .block(Duration.ofSeconds(90));
+    }
+
+    public Map<String, Object> rebuildKnowledgeIndex(List<Map<String, Object>> articles) {
+        if (internalToken == null || internalToken.isBlank()) {
+            throw new IllegalStateException("Agent internal token is not configured");
+        }
+        Map<String, Object> requestBody = new LinkedHashMap<>();
+        requestBody.put("articles", articles == null ? List.of() : articles);
+        String response = webClient.post()
+                .uri("/api/agent/rag/rebuild")
+                .header("X-Agent-Token", internalToken)
+                .bodyValue(requestBody)
+                .retrieve()
+                .bodyToMono(String.class)
+                .block(Duration.ofMinutes(15));
+        if (response == null || response.isBlank()) {
+            throw new IllegalStateException("Agent 未返回知识索引重建结果");
+        }
+        try {
+            JsonNode node = objectMapper.readTree(response);
+            if (!"200".equals(node.path("code").asText())) {
+                throw new IllegalStateException("Agent 知识索引重建失败");
+            }
+            JsonNode data = node.get("data");
+            if (data == null || !data.isObject()) {
+                throw new IllegalStateException("Agent 未返回已验证的索引信息");
+            }
+            return objectMapper.convertValue(data, new TypeReference<Map<String, Object>>() {});
+        } catch (IllegalStateException error) {
+            throw error;
+        } catch (Exception error) {
+            throw new IllegalStateException("Agent 知识索引重建响应无效", error);
+        }
     }
 
     @Override

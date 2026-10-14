@@ -8,6 +8,7 @@ import com.amha.dto.CategoryVO;
 import com.amha.common.PageResult;
 
 import java.util.List;
+import java.util.Map;
 
 public interface KnowledgeService {
     List<CategoryVO> getCategoryTree();
@@ -19,4 +20,5 @@ public interface KnowledgeService {
     void updateArticle(Long id, ArticleSaveRequest request);
     void changeArticleStatus(Long id, Integer status);
     void deleteArticle(Long id);
+    Map<String, Object> rebuildPublishedKnowledgeIndex();
 }

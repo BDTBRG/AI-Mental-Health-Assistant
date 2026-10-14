@@ -9,6 +9,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 @RestController
 @RequestMapping("/knowledge")
@@ -63,5 +64,10 @@ public class KnowledgeController {
     public Result<Void> deleteArticle(@PathVariable Long id) {
         knowledgeService.deleteArticle(id);
         return Result.success();
+    }
+
+    @PostMapping("/index/rebuild")
+    public Result<Map<String, Object>> rebuildPublishedKnowledgeIndex() {
+        return Result.success(knowledgeService.rebuildPublishedKnowledgeIndex());
     }
 }

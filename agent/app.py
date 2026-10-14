@@ -183,8 +183,10 @@ async def rag_rebuild(request: RAGRebuildRequest, _authorized: None = Depends(re
     articles = [a.model_dump() for a in request.articles]
     try:
         total = await asyncio.to_thread(rag_service.rebuild_index, articles)
-        logger.info(f"RAG 索引重建完成: {total} 个向量")
-        return {"code": "200", "data": {"total_vectors": total, "total_articles": len(articles)}}
+        stats = await asyncio.to_thread(rag_service.get_stats)
+        stats["source_articles"] = len(articles)
+        logger.info("RAG 索引重建完成: %s 个向量", total)
+        return {"code": "200", "data": stats}
     except Exception as e:
         logger.error(f"RAG 索引重建失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))

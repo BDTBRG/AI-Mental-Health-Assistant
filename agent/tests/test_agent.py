@@ -9,6 +9,7 @@ from app import app
 from services.agent_service import agent_chat_service
 from services.diary_service import diary_service
 from services.emotion_service import emotion_service
+from services.rag_service import rag_service
 
 
 @pytest.fixture
@@ -106,6 +107,34 @@ class TestChat:
         assert response.status_code == 200
         lines = response.text.strip().split("\n")
         assert len(lines) >= 1
+
+
+class TestRAG:
+    async def test_rebuild_returns_verified_shared_index_metadata(self, client, monkeypatch):
+        received_articles = []
+
+        def rebuild(articles):
+            received_articles.extend(articles)
+            return 1
+
+        def stats():
+            return {
+                "backend": "qdrant",
+                "total_vectors": 2,
+                "total_articles": 1,
+                "index_version": "verified-index-version",
+            }
+
+        monkeypatch.setattr(rag_service, "rebuild_index", rebuild)
+        monkeypatch.setattr(rag_service, "get_stats", stats)
+        response = await client.post("/api/agent/rag/rebuild", json={
+            "articles": [{"id": 8, "title": "已发布知识", "content": "知识内容"}],
+        })
+
+        assert response.status_code == 200
+        assert received_articles == [{"id": 8, "title": "已发布知识", "content": "知识内容"}]
+        assert response.json()["data"]["index_version"] == "verified-index-version"
+        assert response.json()["data"]["total_vectors"] == 2
 
 
 class TestEmotion:

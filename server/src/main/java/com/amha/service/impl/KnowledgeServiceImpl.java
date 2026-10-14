@@ -5,6 +5,7 @@ import cn.hutool.core.util.StrUtil;
 import com.amha.common.BusinessException;
 import com.amha.common.PageResult;
 import com.amha.dto.*;
+import com.amha.agent.RealChatAgent;
 import com.amha.entity.KnowledgeArticle;
 import com.amha.entity.KnowledgeCategory;
 import com.amha.mapper.KnowledgeArticleMapper;
@@ -20,7 +21,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -32,6 +35,7 @@ public class KnowledgeServiceImpl implements KnowledgeService {
     private final KnowledgeArticleMapper articleMapper;
     private final KnowledgeIndexOutboxService indexOutboxService;
     private final ArticleHtmlSanitizer articleHtmlSanitizer;
+    private final RealChatAgent realChatAgent;
 
     @Override
     public List<CategoryVO> getCategoryTree() {
@@ -219,6 +223,21 @@ public class KnowledgeServiceImpl implements KnowledgeService {
         }
         articleMapper.deleteById(id);
         indexOutboxService.enqueueArticle(id);
+    }
+
+    @Override
+    public Map<String, Object> rebuildPublishedKnowledgeIndex() {
+        List<KnowledgeArticle> publishedArticles = articleMapper.selectPublishedForIndex();
+        List<Map<String, Object>> documents = publishedArticles.stream().map(article -> {
+            Map<String, Object> document = new LinkedHashMap<>();
+            document.put("id", article.getId());
+            document.put("title", article.getTitle() == null ? "" : article.getTitle());
+            document.put("content", article.getContent() == null
+                    ? ""
+                    : articleHtmlSanitizer.sanitize(article.getContent()));
+            return document;
+        }).toList();
+        return realChatAgent.rebuildKnowledgeIndex(documents);
     }
 
     private String getStatusText(Integer status) {

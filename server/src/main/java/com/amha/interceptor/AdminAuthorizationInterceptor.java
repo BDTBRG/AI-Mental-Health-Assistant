@@ -20,6 +20,7 @@ public class AdminAuthorizationInterceptor implements HandlerInterceptor {
         Integer userType = (Integer) request.getAttribute("userType");
         if (Integer.valueOf(2).equals(userType)) return true;
 
+        response.setStatus(HttpServletResponse.SC_FORBIDDEN);
         response.setContentType("application/json;charset=UTF-8");
         response.getWriter().write("{\"code\":\"403\",\"msg\":\"仅管理员可访问该接口\"}");
         return false;

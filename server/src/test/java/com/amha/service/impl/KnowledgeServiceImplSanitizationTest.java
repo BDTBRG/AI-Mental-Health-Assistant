@@ -1,6 +1,7 @@
 package com.amha.service.impl;
 
 import com.amha.common.BusinessException;
+import com.amha.agent.RealChatAgent;
 import com.amha.dto.ArticleDetailVO;
 import com.amha.dto.ArticleSaveRequest;
 import com.amha.entity.KnowledgeArticle;
@@ -11,6 +12,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.List;
+import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -19,11 +23,13 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.anyList;
 
 class KnowledgeServiceImplSanitizationTest {
     private KnowledgeCategoryMapper categoryMapper;
     private KnowledgeArticleMapper articleMapper;
     private KnowledgeIndexOutboxService indexOutboxService;
+    private RealChatAgent realChatAgent;
     private KnowledgeServiceImpl service;
 
     @BeforeEach
@@ -31,8 +37,13 @@ class KnowledgeServiceImplSanitizationTest {
         categoryMapper = mock(KnowledgeCategoryMapper.class);
         articleMapper = mock(KnowledgeArticleMapper.class);
         indexOutboxService = mock(KnowledgeIndexOutboxService.class);
+        realChatAgent = mock(RealChatAgent.class);
         service = new KnowledgeServiceImpl(
-                categoryMapper, articleMapper, indexOutboxService, new ArticleHtmlSanitizer());
+                categoryMapper,
+                articleMapper,
+                indexOutboxService,
+                new ArticleHtmlSanitizer(),
+                realChatAgent);
     }
 
     @Test
@@ -93,6 +104,34 @@ class KnowledgeServiceImplSanitizationTest {
 
         assertEquals("400", error.getCode());
         verifyNoInteractions(articleMapper, indexOutboxService);
+    }
+
+    @Test
+    void rebuildPublishedKnowledgeIndexUsesOnlyPublishedArticlesAndReturnsAgentValidation() {
+        KnowledgeArticle published = new KnowledgeArticle();
+        published.setId(21L);
+        published.setTitle("已发布内容");
+        published.setContent("<p>可检索的心理知识</p><script>危险脚本</script>");
+        published.setStatus(1);
+        when(articleMapper.selectPublishedForIndex()).thenReturn(List.of(published));
+        Map<String, Object> agentResult = Map.of(
+                "total_vectors", 2,
+                "total_articles", 1,
+                "index_version", "validated-version");
+        when(realChatAgent.rebuildKnowledgeIndex(anyList())).thenReturn(agentResult);
+
+        Map<String, Object> result = service.rebuildPublishedKnowledgeIndex();
+
+        assertEquals(agentResult, result);
+        verify(articleMapper).selectPublishedForIndex();
+
+        ArgumentCaptor<List<Map<String, Object>>> documents = ArgumentCaptor.forClass(List.class);
+        verify(realChatAgent).rebuildKnowledgeIndex(documents.capture());
+        assertEquals(1, documents.getValue().size());
+        assertEquals(21L, documents.getValue().get(0).get("id"));
+        assertEquals("已发布内容", documents.getValue().get(0).get("title"));
+        assertFalse(String.valueOf(documents.getValue().get(0).get("content")).contains("<script"));
+        assertFalse(String.valueOf(documents.getValue().get(0).get("content")).contains("危险脚本"));
     }
 
     private ArticleSaveRequest requestWithUnsafeContent() {
