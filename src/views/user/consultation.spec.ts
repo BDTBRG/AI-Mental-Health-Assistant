@@ -79,6 +79,45 @@ const ButtonStub = defineComponent({
 	},
 })
 
+const DialogStub = defineComponent({
+	props: { modelValue: { type: Boolean, default: false } },
+	setup(props, { slots }) {
+		return () => props.modelValue
+			? h('section', { 'data-testid': 'memory-dialog' }, [
+				slots.default?.(),
+				h('footer', slots.footer?.()),
+			])
+			: null
+	},
+})
+
+const SwitchStub = defineComponent({
+	props: {
+		modelValue: { type: Boolean, default: false },
+		disabled: { type: Boolean, default: false },
+	},
+	emits: ['update:modelValue', 'change'],
+	setup(props, { emit }) {
+		return () => h('button', {
+			'data-testid': 'memory-switch',
+			'aria-pressed': String(props.modelValue),
+			disabled: props.disabled,
+			onClick: () => {
+				const nextValue = !props.modelValue
+				emit('update:modelValue', nextValue)
+				emit('change', nextValue)
+			},
+		})
+	},
+})
+
+const EmptyStub = defineComponent({
+	props: { description: { type: String, default: '' } },
+	setup(props) {
+		return () => h('div', { 'data-testid': 'memory-empty' }, props.description)
+	},
+})
+
 const session: HistorySession = {
 	id: 7,
 	userId: 4,
@@ -133,12 +172,12 @@ const mountPage = () =>
 				'el-button': ButtonStub,
 				'el-checkbox': true,
 				'el-date-picker': true,
-				'el-dialog': true,
-				'el-empty': true,
+				'el-dialog': DialogStub,
+				'el-empty': EmptyStub,
 				'el-icon': true,
 				'el-image': true,
 				'el-input': InputStub,
-				'el-switch': true,
+				'el-switch': SwitchStub,
 				'el-tooltip': true,
 				ChatRound: true,
 				Clock: true,
@@ -595,5 +634,78 @@ describe('consultation conversation recovery', () => {
 		expect(wrapper.text()).not.toContain('会话加载失败，请重试')
 		expect((wrapper.get('[data-testid="message-input"]').element as HTMLTextAreaElement).value)
 			.toBe('不要丢失这段草稿')
+	})
+})
+
+describe('personalization memory state', () => {
+	let wrapper: ReturnType<typeof mountPage> | undefined
+
+	beforeEach(() => {
+		mocks.getPersonalizationConsent.mockReset()
+		mocks.getAgentMemories.mockReset()
+		mocks.setPersonalizationConsent.mockReset()
+		mocks.getHistorySessionList.mockReset().mockResolvedValue({ records: [session] })
+		mocks.getHistorySessionMessages.mockReset().mockResolvedValue([])
+		mocks.getEmotionAnalysis.mockReset().mockResolvedValue(null)
+		mocks.fetchEventSource.mockReset().mockImplementation(completeStream)
+	})
+
+	afterEach(() => {
+		wrapper?.unmount()
+		wrapper = undefined
+	})
+
+	const openMemorySettings = async () => {
+		wrapper = mountPage()
+		await flushPromises()
+		const openButton = wrapper.findAll('button').find(button => button.text().includes('管理个性化记忆'))
+		if (!openButton) throw new Error('memory settings button was not rendered')
+		await openButton.trigger('click')
+		await flushPromises()
+	}
+
+	it('does not present failed consent or memory reads as disabled and empty', async () => {
+		mocks.getPersonalizationConsent.mockRejectedValueOnce(new Error('consent unavailable'))
+		mocks.getAgentMemories.mockResolvedValueOnce([])
+		await openMemorySettings()
+
+		expect(wrapper?.text()).toContain('无法确认个性化记忆授权与列表状态')
+		expect(wrapper?.find('[data-testid="memory-empty"]').exists()).toBe(false)
+		expect(wrapper?.find('[data-testid="memory-switch"]').exists()).toBe(false)
+		expect(wrapper?.find('.retry-memory-settings').exists()).toBe(true)
+	})
+
+	it('reloads consent and memories before showing the empty or saved state', async () => {
+		mocks.getPersonalizationConsent
+			.mockRejectedValueOnce(new Error('temporary failure'))
+			.mockResolvedValueOnce({ enabled: true })
+		mocks.getAgentMemories
+			.mockResolvedValueOnce([])
+			.mockResolvedValueOnce([{ id: 9, content: '偏好简短回答', expiresAt: null }])
+		await openMemorySettings()
+
+		await wrapper?.get('.retry-memory-settings').trigger('click')
+		await flushPromises()
+
+		expect(wrapper?.get('[data-testid="memory-switch"]').attributes('disabled')).toBeUndefined()
+		expect(wrapper?.get('[data-testid="memory-switch"]').attributes('aria-pressed')).toBe('true')
+		expect(wrapper?.find('[data-testid="memory-empty"]').exists()).toBe(false)
+		expect(wrapper?.text()).toContain('偏好简短回答')
+		expect(wrapper?.text()).not.toContain('无法确认个性化记忆授权与列表状态')
+	})
+
+	it('hides consent controls when an update response leaves the server state uncertain', async () => {
+		mocks.getPersonalizationConsent.mockResolvedValueOnce({ enabled: false })
+		mocks.getAgentMemories.mockResolvedValueOnce([])
+		mocks.setPersonalizationConsent.mockRejectedValueOnce(new Error('response lost'))
+		await openMemorySettings()
+
+		await wrapper?.get('[data-testid="memory-switch"]').trigger('click')
+		await flushPromises()
+
+		expect(mocks.setPersonalizationConsent).toHaveBeenCalledWith(true)
+		expect(wrapper?.text()).toContain('无法确认个性化记忆授权与列表状态')
+		expect(wrapper?.find('[data-testid="memory-switch"]').exists()).toBe(false)
+		expect(wrapper?.find('.retry-memory-settings').exists()).toBe(true)
 	})
 })

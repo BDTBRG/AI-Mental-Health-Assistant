@@ -338,33 +338,40 @@
 		<el-alert type="info" :closable="false" show-icon>
 			<template #title>只有你主动保存的信息会作为个人化背景。关闭授权后，后续对话不再读取记忆或近期自评；删除会立即清除已保存内容。</template>
 		</el-alert>
-		<div class="memory-consent-row">
-			<span>允许使用个性化记忆</span>
-			<el-switch v-model="memoryEnabled" :disabled="memoryLoading || isAiTying" @change="handleMemoryConsentChange" />
+		<div v-if="memoryLoadState === 'loading'" class="memory-load-state" role="status">正在读取授权和记忆状态…</div>
+		<div v-else-if="memoryLoadState === 'error'" class="memory-load-state memory-load-error" role="alert">
+			<p>无法确认个性化记忆授权与列表状态。为避免误报成未授权或空列表，请重新读取后再管理。</p>
+			<el-button class="retry-memory-settings" :loading="memoryLoading" @click="loadMemorySettings">重试读取</el-button>
 		</div>
-		<div v-if="memoryEnabled" class="memory-editor">
-			<el-input v-model="memoryDraft" type="textarea" :rows="3" maxlength="500" show-word-limit placeholder="例如：我更喜欢简短直接的建议；工作日晚上通常有时间练习" />
-			<div class="memory-editor-footer">
-				<el-date-picker v-model="memoryExpiresAt" type="date" value-format="YYYY-MM-DD" clearable placeholder="有效期（可选）" />
-				<div>
-					<el-button v-if="editingMemoryId !== null" @click="resetMemoryEditor">取消编辑</el-button>
-					<el-button type="primary" :loading="memorySaving" @click="saveAgentMemory">{{ editingMemoryId === null ? '保存记忆' : '保存修改' }}</el-button>
+		<template v-else-if="memoryLoadState === 'ready'">
+			<div class="memory-consent-row">
+				<span>允许使用个性化记忆</span>
+				<el-switch v-model="memoryEnabled" :disabled="memoryLoading || memoryConsentSaving || isAiTying" @change="handleMemoryConsentChange" />
+			</div>
+			<div v-if="memoryEnabled" class="memory-editor">
+				<el-input v-model="memoryDraft" type="textarea" :rows="3" maxlength="500" show-word-limit placeholder="例如：我更喜欢简短直接的建议；工作日晚上通常有时间练习" />
+				<div class="memory-editor-footer">
+					<el-date-picker v-model="memoryExpiresAt" type="date" value-format="YYYY-MM-DD" clearable placeholder="有效期（可选）" />
+					<div>
+						<el-button v-if="editingMemoryId !== null" @click="resetMemoryEditor">取消编辑</el-button>
+						<el-button type="primary" :loading="memorySaving" @click="saveAgentMemory">{{ editingMemoryId === null ? '保存记忆' : '保存修改' }}</el-button>
+					</div>
 				</div>
 			</div>
-		</div>
-		<el-empty v-if="!agentMemories.length" :description="memoryEnabled ? '还没有主动保存的记忆' : '没有已保存的记忆'" :image-size="70" />
-		<div v-if="agentMemories.length" class="memory-list">
-			<div v-for="memory in agentMemories" :key="memory.id" class="memory-item">
-				<div class="memory-content">{{ memory.content }}</div>
-				<div class="memory-meta">来源：用户主动添加 · {{ memory.expiresAt ? `有效至 ${memory.expiresAt}` : '长期有效' }}</div>
-				<div class="memory-actions">
-					<el-button text type="primary" @click="editAgentMemory(memory)">纠正</el-button>
-					<el-button text type="danger" @click="removeAgentMemory(memory.id)">删除</el-button>
+			<el-empty v-if="!agentMemories.length" :description="memoryEnabled ? '还没有主动保存的记忆' : '没有已保存的记忆'" :image-size="70" />
+			<div v-if="agentMemories.length" class="memory-list">
+				<div v-for="memory in agentMemories" :key="memory.id" class="memory-item">
+					<div class="memory-content">{{ memory.content }}</div>
+					<div class="memory-meta">来源：用户主动添加 · {{ memory.expiresAt ? `有效至 ${memory.expiresAt}` : '长期有效' }}</div>
+					<div class="memory-actions">
+						<el-button text type="primary" @click="editAgentMemory(memory)">纠正</el-button>
+						<el-button text type="danger" @click="removeAgentMemory(memory.id)">删除</el-button>
+					</div>
 				</div>
 			</div>
-		</div>
+		</template>
 		<template #footer>
-			<el-button v-if="agentMemories.length" type="danger" plain @click="clearAllAgentMemories">删除全部并撤回授权</el-button>
+			<el-button v-if="memoryLoadState === 'ready' && agentMemories.length" type="danger" plain @click="clearAllAgentMemories">删除全部并撤回授权</el-button>
 			<el-button @click="showMemoryDialog = false">关闭</el-button>
 		</template>
 	</el-dialog>
@@ -433,36 +440,53 @@ const reviewStatus = ref<'NONE' | 'PENDING' | 'IN_PROGRESS' | 'RESOLVED' | 'CANC
 const showMemoryDialog = ref(false)
 const memoryLoading = ref(false)
 const memorySaving = ref(false)
+const memoryConsentSaving = ref(false)
+const memoryLoadState = ref<'idle' | 'loading' | 'ready' | 'error'>('idle')
 const memoryEnabled = ref(false)
 const agentMemories = ref<AgentMemoryItem[]>([])
 const memoryDraft = ref('')
 const memoryExpiresAt = ref<string | null>(null)
 const editingMemoryId = ref<number | null>(null)
+let memoryLoadSequence = 0
 
-const openMemoryDialog = async () => {
-	showMemoryDialog.value = true
+const loadMemorySettings = async () => {
+	const sequence = ++memoryLoadSequence
 	memoryLoading.value = true
+	memoryLoadState.value = 'loading'
 	try {
 		const [consent, memories] = await Promise.all([
 			getPersonalizationConsent(),
 			getAgentMemories(),
 		])
+		if (sequence !== memoryLoadSequence) return
 		memoryEnabled.value = consent.enabled
 		agentMemories.value = memories
+		memoryLoadState.value = 'ready'
 	} catch {
-		ElMessage.error('读取个性化记忆失败')
+		if (sequence !== memoryLoadSequence) return
+		memoryLoadState.value = 'error'
 	} finally {
-		memoryLoading.value = false
+		if (sequence === memoryLoadSequence) memoryLoading.value = false
 	}
 }
 
+const openMemoryDialog = async () => {
+	showMemoryDialog.value = true
+	await loadMemorySettings()
+}
+
 const handleMemoryConsentChange = async (allowed: string | number | boolean) => {
+	if (memoryLoadState.value !== 'ready' || memoryConsentSaving.value || isAiTying.value) return
 	const nextValue = Boolean(allowed)
+	memoryConsentSaving.value = true
 	try {
 		await setPersonalizationConsent(nextValue)
 		ElMessage.success(nextValue ? '已开启个性化记忆' : '已关闭个性化记忆读取')
 	} catch {
-		memoryEnabled.value = !nextValue
+		memoryLoadState.value = 'error'
+		ElMessage.error('授权状态更新失败，当前状态无法确认，请重新读取')
+	} finally {
+		memoryConsentSaving.value = false
 	}
 }
 
@@ -1804,6 +1828,9 @@ onBeforeUnmount(() => {
 		color: #6b7280;
 	}
 	.memory-consent-row { display: flex; align-items: center; justify-content: space-between; margin: 18px 0; padding: 12px 14px; background: #f8fafc; border-radius: 8px; color: #374151; }
+	.memory-load-state { margin-top: 18px; color: #6b7280; line-height: 1.6; }
+	.memory-load-error { color: #9f1239; }
+	.memory-load-error p { margin: 0 0 10px; }
 	.memory-editor { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
 	.memory-editor-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 	.memory-list { display: flex; flex-direction: column; gap: 10px; max-height: 260px; overflow-y: auto; }
