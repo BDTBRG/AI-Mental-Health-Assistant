@@ -14,10 +14,9 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-
 import config
 from services.agent_service import agent_chat_service
+from services.checkpointer import open_checkpointer
 from services.emotion_service import emotion_service
 from services.diary_service import diary_service
 from services.rag_service import rag_service
@@ -37,8 +36,9 @@ async def lifespan(app: FastAPI):
         logger.info(f"FAISS 索引加载成功: {rag_service.total_vectors} 个向量, {rag_service.total_articles} 篇文章")
     else:
         logger.info("未找到已有索引，等待 Spring Boot 推送知识库数据进行重建")
-    os.makedirs(os.path.dirname(config.AGENT_CHECKPOINT_DB) or ".", exist_ok=True)
-    async with AsyncSqliteSaver.from_conn_string(config.AGENT_CHECKPOINT_DB) as checkpointer:
+    if config.AGENT_CHECKPOINT_BACKEND == "sqlite":
+        os.makedirs(os.path.dirname(config.AGENT_CHECKPOINT_DB) or ".", exist_ok=True)
+    async with open_checkpointer() as checkpointer:
         agent_chat_service.configure_checkpointer(checkpointer)
         try:
             yield

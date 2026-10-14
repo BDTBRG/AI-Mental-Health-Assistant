@@ -15,10 +15,14 @@ except ValueError as error:
 if not 1 <= AGENT_PORT <= 65535:
     raise ValueError("AGENT_PORT must be between 1 and 65535")
 AGENT_RELOAD = os.getenv("AGENT_RELOAD", "false").strip().lower() in {"1", "true", "yes", "on"}
+AGENT_CHECKPOINT_BACKEND = os.getenv("AGENT_CHECKPOINT_BACKEND", "sqlite").strip().lower()
+if AGENT_CHECKPOINT_BACKEND not in {"sqlite", "postgres"}:
+    raise ValueError("AGENT_CHECKPOINT_BACKEND must be 'sqlite' or 'postgres'")
 AGENT_CHECKPOINT_DB = os.getenv(
     "AGENT_CHECKPOINT_DB",
     os.path.join(os.path.dirname(__file__), "data", "agent_checkpoints.sqlite"),
 )
+AGENT_CHECKPOINT_POSTGRES_DSN = os.getenv("AGENT_CHECKPOINT_POSTGRES_DSN", "")
 AGENT_INTERNAL_TOKEN = os.getenv("AGENT_INTERNAL_TOKEN", "")
 LLM_MAX_CONCURRENT_CALLS = max(1, int(os.getenv("LLM_MAX_CONCURRENT_CALLS", "8")))
 LLM_REQUEST_TIMEOUT_SECONDS = max(5, int(os.getenv("LLM_REQUEST_TIMEOUT_SECONDS", "50")))

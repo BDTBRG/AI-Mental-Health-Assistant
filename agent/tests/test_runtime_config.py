@@ -19,6 +19,17 @@ def load_config(environment):
     spec = spec_from_file_location("agent_config_under_test", CONFIG_PATH)
     module = module_from_spec(spec)
     with patch.dict(os.environ, environment, clear=False):
+        runtime_keys = (
+            "AGENT_HOST",
+            "AGENT_PORT",
+            "AGENT_RELOAD",
+            "AGENT_CHECKPOINT_BACKEND",
+            "AGENT_CHECKPOINT_DB",
+            "AGENT_CHECKPOINT_POSTGRES_DSN",
+        )
+        for key in runtime_keys:
+            if key not in environment:
+                os.environ.pop(key, None)
         with patch.dict(sys.modules, {"dotenv": dotenv_stub}):
             spec.loader.exec_module(module)
             observed_environment = {
@@ -53,6 +64,26 @@ class AgentRuntimeConfigTests(unittest.TestCase):
             os.environ.pop("AGENT_RELOAD", None)
             config, _ = load_config({})
         self.assertFalse(config.AGENT_RELOAD)
+
+    def test_checkpoint_backend_defaults_to_existing_sqlite_path(self):
+        config, _ = load_config({})
+        self.assertEqual("sqlite", config.AGENT_CHECKPOINT_BACKEND)
+        self.assertTrue(config.AGENT_CHECKPOINT_DB.endswith("agent_checkpoints.sqlite"))
+
+    def test_checkpoint_backend_accepts_postgres_dsn(self):
+        config, _ = load_config({
+            "AGENT_CHECKPOINT_BACKEND": "postgres",
+            "AGENT_CHECKPOINT_POSTGRES_DSN": "postgresql://agent:secret@db/agent",
+        })
+        self.assertEqual("postgres", config.AGENT_CHECKPOINT_BACKEND)
+        self.assertEqual(
+            "postgresql://agent:secret@db/agent",
+            config.AGENT_CHECKPOINT_POSTGRES_DSN,
+        )
+
+    def test_checkpoint_backend_rejects_unknown_values(self):
+        with self.assertRaisesRegex(ValueError, "AGENT_CHECKPOINT_BACKEND"):
+            load_config({"AGENT_CHECKPOINT_BACKEND": "memory"})
 
     def test_port_accepts_only_valid_tcp_port_range(self):
         for port in ("1", "65535"):
