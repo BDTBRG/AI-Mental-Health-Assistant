@@ -4,7 +4,14 @@ import json
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from prompts.context_summary_prompt import (
     CONTEXT_SUMMARY_PROMPT_VERSION,
@@ -92,7 +99,7 @@ class ContextSummary(BaseModel):
         return self
 
 
-class _InputMessage(BaseModel):
+class ContextSummaryMessage(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True, strict=True)
 
     id: int = Field(gt=0)
@@ -100,11 +107,46 @@ class _InputMessage(BaseModel):
     content: str
 
 
+class ContextSummaryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True, strict=True)
+
+    session_id: str = Field(alias="sessionId", min_length=1, max_length=128)
+    user_id: str | int = Field(alias="userId")
+    previous_summary: ContextSummary | None = Field(
+        default=None, alias="previousSummary"
+    )
+    messages: list[ContextSummaryMessage] = Field(max_length=MAX_INPUT_MESSAGES)
+    prompt_version: str = Field(alias="promptVersion", min_length=1, max_length=64)
+    correlation_id: str = Field(alias="correlationId", min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def messages_are_unique_and_bounded(self) -> "ContextSummaryRequest":
+        message_ids = [message.id for message in self.messages]
+        if len(set(message_ids)) != len(message_ids):
+            raise ValueError("message IDs must be unique")
+        if sum(len(message.content) for message in self.messages) > MAX_INPUT_TEXT_CHARS:
+            raise ValueError(
+                f"message content exceeds {MAX_INPUT_TEXT_CHARS} characters"
+            )
+        return self
+
+
+class ContextSummaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True, strict=True)
+
+    summary: ContextSummary
+    covered_through_message_id: int | None = Field(
+        alias="coveredThroughMessageId"
+    )
+    prompt_version: str = Field(alias="promptVersion")
+
+
 class ContextSummaryService:
     """Summarizes bounded conversation data without advancing on invalid output."""
 
-    def __init__(self, model: Any):
+    def __init__(self, model: Any, governor: Any | None = None):
         self.model = model
+        self.governor = governor
 
     async def summarize(
         self,
@@ -112,10 +154,6 @@ class ContextSummaryService:
         messages: list[dict[str, Any]],
         user_id: str | int | None = None,
     ) -> ContextSummary:
-        # user_id is accepted for the later request-governance integration. It is
-        # deliberately excluded from the model prompt and summary payload.
-        del user_id
-
         validated_previous = self._parse_previous_summary(previous_summary)
         validated_messages = self._validate_messages(messages)
         allowed_source_ids = self._source_ids(validated_previous)
@@ -127,12 +165,20 @@ class ContextSummaryService:
             ),
             "messages": [message.model_dump(by_alias=True) for message in validated_messages],
         }
-        response = await self.model.ainvoke(
-            [
-                SystemMessage(content=CONTEXT_SUMMARY_SYSTEM_PROMPT),
-                HumanMessage(content=json.dumps(prompt_data, ensure_ascii=False)),
-            ]
-        )
+        prompt_messages = [
+            SystemMessage(content=CONTEXT_SUMMARY_SYSTEM_PROMPT),
+            HumanMessage(content=json.dumps(prompt_data, ensure_ascii=False)),
+        ]
+        if self.governor is None:
+            response = await self.model.ainvoke(prompt_messages)
+        else:
+            response = await self.governor.invoke(
+                self.model,
+                prompt_messages,
+                "context-summary",
+                {"userId": str(user_id) if user_id is not None else ""},
+                CONTEXT_SUMMARY_PROMPT_VERSION,
+            )
         return self._parse_output(getattr(response, "content", None), allowed_source_ids)
 
     @staticmethod
@@ -149,7 +195,7 @@ class ContextSummaryService:
             raise ContextSummaryInputError("previous summary is invalid") from error
 
     @staticmethod
-    def _validate_messages(messages: list[dict[str, Any]]) -> list[_InputMessage]:
+    def _validate_messages(messages: list[dict[str, Any]]) -> list[ContextSummaryMessage]:
         if not isinstance(messages, list):
             raise ContextSummaryInputError("messages must be a list")
         if len(messages) > MAX_INPUT_MESSAGES:
@@ -157,7 +203,7 @@ class ContextSummaryService:
                 f"messages exceed {MAX_INPUT_MESSAGES} items"
             )
         try:
-            validated = [_InputMessage.model_validate(message) for message in messages]
+            validated = [ContextSummaryMessage.model_validate(message) for message in messages]
         except ValidationError as error:
             raise ContextSummaryInputError("message input is invalid") from error
 

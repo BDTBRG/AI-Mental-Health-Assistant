@@ -130,6 +130,34 @@ async def test_empty_summary_is_valid_and_user_id_is_not_sent_to_the_model():
 
 
 @pytest.mark.asyncio
+async def test_user_id_is_passed_only_to_the_call_governor():
+    output = '{"userStatedContext":[],"userPreferences":[],"openTopics":[]}'
+    model = FakeModel(output)
+
+    class CapturingGovernor:
+        def __init__(self):
+            self.context = None
+
+        async def invoke(self, llm, messages, stage, request_context, prompt_version):
+            self.context = (stage, request_context, prompt_version)
+            return await llm.ainvoke(messages)
+
+    governor = CapturingGovernor()
+    await ContextSummaryService(model, governor=governor).summarize(
+        None, [], user_id="private-user-9"
+    )
+
+    assert governor.context == (
+        "context-summary",
+        {"userId": "private-user-9"},
+        "context-summary-v1",
+    )
+    assert "private-user-9" not in " ".join(
+        message.content for message in model.calls[0]
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "summary",
     [

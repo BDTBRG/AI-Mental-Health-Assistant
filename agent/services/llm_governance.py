@@ -15,9 +15,20 @@ class ProviderCircuitOpen(RuntimeError):
     pass
 
 
+class LLMQueueTimeout(TimeoutError):
+    """The caller could not get an LLM permit within its queue budget."""
+
+
+class LLMRequestTimeout(TimeoutError):
+    """The provider did not finish an LLM request within its call budget."""
+
+
 class LLMCallGovernor:
     def __init__(self):
         self._slots = asyncio.Semaphore(config.LLM_MAX_CONCURRENT_CALLS)
+        self._summary_slots = asyncio.Semaphore(
+            config.LLM_CONTEXT_SUMMARY_MAX_CONCURRENT_CALLS
+        )
         self._failure_times = deque(maxlen=config.LLM_CIRCUIT_FAILURE_THRESHOLD)
         self._open_until = 0.0
         self._user_call_times = defaultdict(deque)
@@ -30,26 +41,33 @@ class LLMCallGovernor:
             raise ProviderCircuitOpen("LLM provider circuit is open")
 
         context = request_context or {}
-        self._enforce_user_limit(str(context.get("userId", "")), now)
         started = time.monotonic()
+        acquired_slots = []
         try:
-            async with self._slots:
+            loop = asyncio.get_running_loop()
+            queue_deadline = loop.time() + config.LLM_QUEUE_WAIT_TIMEOUT_SECONDS
+            if stage == "context-summary":
+                await self._acquire(self._summary_slots, queue_deadline, loop)
+                acquired_slots.append(self._summary_slots)
+            await self._acquire(self._slots, queue_deadline, loop)
+            acquired_slots.append(self._slots)
+            self._enforce_user_limit(str(context.get("userId", "")), time.monotonic())
+            try:
                 response = await asyncio.wait_for(
                     llm.ainvoke(messages),
                     timeout=config.LLM_REQUEST_TIMEOUT_SECONDS,
                 )
-        except Exception:
-            self._record_failure(time.monotonic())
-            logger.warning(
-                "llm_call_failed stage=%s model=%s prompt=%s index=%s elapsed_ms=%d turn=%s",
-                stage,
-                config.DEEPSEEK_MODEL,
-                prompt_version,
-                context.get("knowledgeIndexVersion", "not-applicable"),
-                int((time.monotonic() - started) * 1000),
-                context.get("turnId", ""),
-            )
-            raise
+            except asyncio.TimeoutError as error:
+                self._record_failure(time.monotonic())
+                self._log_failure(stage, prompt_version, context, started)
+                raise LLMRequestTimeout("LLM provider request timed out") from error
+            except Exception:
+                self._record_failure(time.monotonic())
+                self._log_failure(stage, prompt_version, context, started)
+                raise
+        finally:
+            for semaphore in reversed(acquired_slots):
+                semaphore.release()
 
         self._failure_times.clear()
         self._open_until = 0.0
@@ -68,6 +86,29 @@ class LLMCallGovernor:
             context.get("turnId", ""),
         )
         return response
+
+    @staticmethod
+    async def _acquire(semaphore: asyncio.Semaphore, deadline: float, loop) -> None:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise LLMQueueTimeout("LLM queue wait budget expired")
+        try:
+            await asyncio.wait_for(semaphore.acquire(), timeout=remaining)
+        except asyncio.TimeoutError as error:
+            raise LLMQueueTimeout("LLM queue wait budget expired") from error
+
+    @staticmethod
+    def _log_failure(stage: str, prompt_version: str,
+                     context: Dict[str, Any], started: float) -> None:
+        logger.warning(
+            "llm_call_failed stage=%s model=%s prompt=%s index=%s elapsed_ms=%d turn=%s",
+            stage,
+            config.DEEPSEEK_MODEL,
+            prompt_version,
+            context.get("knowledgeIndexVersion", "not-applicable"),
+            int((time.monotonic() - started) * 1000),
+            context.get("turnId", ""),
+        )
 
     def _enforce_user_limit(self, user_id: str, now: float) -> None:
         if not user_id:

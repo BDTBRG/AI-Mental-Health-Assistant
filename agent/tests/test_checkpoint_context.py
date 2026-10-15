@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -83,6 +84,139 @@ async def test_personal_context_is_passed_as_runtime_context_not_checkpoint_stat
     assert "approvedMemories" not in repr(graph.state)
     assert isinstance(graph.context, AgentRequestContext)
     assert graph.context.values == private_context
+
+
+@pytest.mark.asyncio
+async def test_context_summary_is_ephemeral_model_input_not_checkpoint_or_history(monkeypatch):
+    summary_text = "用户偏好被称呼为小宁"
+    summary = {
+        "userStatedContext": [],
+        "userPreferences": [
+            {"text": summary_text, "sourceMessageIds": [41]}
+        ],
+        "openTopics": [],
+    }
+    service = AgentChatService.__new__(AgentChatService)
+    service.llm_with_tools = object()
+    service.base_llm = object()
+    service.configure_checkpointer(InMemorySaver(), SessionLifecycleGuard("sqlite"))
+    captured_model_messages = []
+
+    class SummaryGovernor:
+        async def invoke(self, _llm, messages, _stage, _request_context, _prompt_version):
+            captured_model_messages.append(list(messages))
+            return AIMessage(content="好的，小宁。")
+
+    monkeypatch.setattr(agent_service_module, "llm_call_governor", SummaryGovernor())
+    monkeypatch.setattr(
+        agent_service_module.rag_service,
+        "refresh_shared_index_state",
+        lambda: {"index_version": "test-index"},
+    )
+    first_context = {
+        "sessionId": "session-41",
+        "turnId": "turn-41",
+        "generationToken": "generation-41",
+        "userId": "user-41",
+        "contextSummary": summary,
+    }
+    token = CURRENT_AGENT_CONTEXT.set(first_context)
+    try:
+        first_reply = [
+            chunk async for chunk in service.stream_chat([], "你可以怎么称呼我？")
+        ]
+        saved_checkpoint = await service.checkpointer.aget_tuple(
+            build_checkpoint_run_config("session-41")
+        )
+    finally:
+        CURRENT_AGENT_CONTEXT.reset(token)
+
+    next_context = {
+        **first_context,
+        "turnId": "turn-42",
+        "generationToken": "generation-42",
+    }
+    next_context.pop("contextSummary")
+    token = CURRENT_AGENT_CONTEXT.set(next_context)
+    try:
+        next_reply = [
+            chunk
+            async for chunk in service.stream_chat(
+                [
+                    {"senderType": 1, "content": "你可以怎么称呼我？"},
+                    {"senderType": 2, "content": "好的，小宁。"},
+                ],
+                "继续",
+            )
+        ]
+    finally:
+        CURRENT_AGENT_CONTEXT.reset(token)
+
+    checkpoint_messages = saved_checkpoint.checkpoint["channel_values"]["messages"]
+    first_provider_messages = captured_model_messages[0]
+    next_provider_messages = captured_model_messages[1]
+
+    assert "".join(first_reply) == "好的，小宁。"
+    assert "".join(next_reply) == "好的，小宁。"
+    assert any(summary_text in message.content for message in first_provider_messages)
+    assert summary_text not in repr(checkpoint_messages)
+    assert all(summary_text not in message.content for message in next_provider_messages)
+
+
+@pytest.mark.asyncio
+async def test_turn_deadline_cancels_generation_without_checkpointing_success(monkeypatch):
+    monkeypatch.setattr(agent_service_module.config, "AGENT_TURN_TIMEOUT_SECONDS", 0.1)
+    service = AgentChatService.__new__(AgentChatService)
+    service.llm_with_tools = object()
+    service.base_llm = object()
+    service.configure_checkpointer(InMemorySaver(), SessionLifecycleGuard("sqlite"))
+
+    class BlockingGovernor:
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.cancelled = False
+
+        async def invoke(self, _llm, _messages, _stage, _context, _prompt_version):
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cancelled = True
+
+    governor = BlockingGovernor()
+    monkeypatch.setattr(agent_service_module, "llm_call_governor", governor)
+    monkeypatch.setattr(
+        agent_service_module.rag_service,
+        "refresh_shared_index_state",
+        lambda: {"index_version": "test-index"},
+    )
+    token = CURRENT_AGENT_CONTEXT.set(
+        {
+            "sessionId": "session-42",
+            "turnId": "turn-42",
+            "generationToken": "generation-42",
+        }
+    )
+    try:
+        async def consume():
+            return [
+                chunk
+                async for chunk in service.stream_chat([], "今天工作压力有点大")
+            ]
+
+        pending_turn = asyncio.create_task(consume())
+        await asyncio.wait_for(governor.started.wait(), timeout=1)
+        with pytest.raises(TimeoutError, match="turn deadline"):
+            await asyncio.wait_for(pending_turn, timeout=0.3)
+        snapshot = await service.checkpointer.aget_tuple(
+            build_checkpoint_run_config("session-42")
+        )
+    finally:
+        CURRENT_AGENT_CONTEXT.reset(token)
+
+    assert governor.cancelled
+    assert snapshot is not None
+    assert not snapshot.checkpoint["channel_values"].get("final_text")
 
 
 @pytest.mark.asyncio

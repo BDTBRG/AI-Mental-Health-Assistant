@@ -14,10 +14,18 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from redis import asyncio as redis_async
 import config
 from services.agent_service import agent_chat_service
+from services.context_summary_service import (
+    ContextSummary,
+    ContextSummaryInputError,
+    ContextSummaryOutputError,
+    ContextSummaryRequest,
+    ContextSummaryResponse,
+    ContextSummaryService,
+)
 from services.checkpoint_config import (
     require_generation_token,
     normalize_generation_fencing_fields,
@@ -27,6 +35,13 @@ from services.session_lifecycle import open_session_lifecycle_guard
 from services.emotion_service import emotion_service
 from services.diary_service import diary_service
 from services.rag_service import rag_service
+from services.llm_governance import (
+    LLMQueueTimeout,
+    LLMRequestTimeout,
+    ProviderCircuitOpen,
+    llm_call_governor,
+)
+from prompts.context_summary_prompt import CONTEXT_SUMMARY_PROMPT_VERSION
 from tools.mental_health_tools import CURRENT_AGENT_CONTEXT
 
 logging.basicConfig(level=logging.INFO)
@@ -79,6 +94,78 @@ app.state.ready = False
 app.state.checkpointer = None
 
 
+class JsonBodySizeLimitMiddleware:
+    """Buffer and bound JSON bodies before FastAPI parses request models."""
+
+    def __init__(self, asgi_app, max_bytes: int):
+        self.asgi_app = asgi_app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.asgi_app(scope, receive, send)
+            return
+
+        headers = {key.lower(): value for key, value in scope.get("headers", [])}
+        content_type = headers.get(b"content-type", b"").split(b";", 1)[0].strip().lower()
+        if content_type != b"application/json":
+            await self.asgi_app(scope, receive, send)
+            return
+
+        content_length = headers.get(b"content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > self.max_bytes:
+                    await self._too_large(scope, receive, send)
+                    return
+            except ValueError:
+                pass
+
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            if message["type"] != "http.request":
+                continue
+            chunk = message.get("body", b"")
+            if len(body) + len(chunk) > self.max_bytes:
+                await self._too_large(scope, receive, send)
+                return
+            body.extend(chunk)
+            if not message.get("more_body", False):
+                break
+
+        replayed = False
+
+        async def replay_receive():
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": bytes(body), "more_body": False}
+            return await receive()
+
+        await self.asgi_app(scope, replay_receive, send)
+
+    @staticmethod
+    async def _too_large(scope, receive, send):
+        response = JSONResponse(
+            status_code=413,
+            content={"detail": "JSON request body exceeds the configured limit"},
+        )
+        await response(scope, receive, send)
+
+
+app.add_middleware(
+    JsonBodySizeLimitMiddleware,
+    max_bytes=config.AGENT_MAX_JSON_BODY_BYTES,
+)
+context_summary_service = ContextSummaryService(
+    agent_chat_service.base_llm,
+    governor=llm_call_governor,
+)
+
+
 def require_internal_token(x_agent_token: str = Header(default="")) -> None:
     expected_token = config.AGENT_INTERNAL_TOKEN
     if not expected_token:
@@ -89,13 +176,24 @@ def require_internal_token(x_agent_token: str = Header(default="")) -> None:
 
 class ChatMessage(BaseModel):
     senderType: int
-    content: str
+    content: str = Field(max_length=config.AGENT_MAX_CHAT_MESSAGE_CHARS)
 
 class ChatRequest(BaseModel):
     sessionId: str
-    messages: List[ChatMessage] = Field(default_factory=list)
-    userMessage: str
+    messages: List[ChatMessage] = Field(default_factory=list, max_length=39)
+    userMessage: str = Field(max_length=config.AGENT_MAX_CHAT_MESSAGE_CHARS)
+    contextSummary: Optional[ContextSummary] = None
     context: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def enforce_context_budget(self):
+        total_chars = sum(len(message.content) for message in self.messages)
+        total_chars += len(self.userMessage)
+        if self.contextSummary is not None:
+            total_chars += len(self.contextSummary.model_dump_json(by_alias=True))
+        if total_chars > config.AGENT_MAX_CHAT_CONTEXT_CHARS:
+            raise ValueError("chat context exceeds the configured character limit")
+        return self
 
 class EmotionRequest(BaseModel):
     userId: Optional[str] = None
@@ -214,10 +312,14 @@ async def delete_session_v2(
 
 def _build_chat_stream_response(request: ChatRequest) -> StreamingResponse:
     messages_dict = [{"senderType": m.senderType, "content": m.content} for m in request.messages]
+    request_context = dict(request.context)
+    request_context.pop("contextSummary", None)
+    if request.contextSummary is not None:
+        request_context["contextSummary"] = request.contextSummary.model_dump(by_alias=True)
 
     async def generate_lines():
         full_response = ""
-        context_token = CURRENT_AGENT_CONTEXT.set(request.context)
+        context_token = CURRENT_AGENT_CONTEXT.set(request_context)
         try:
             async for chunk in agent_chat_service.stream_chat(messages_dict, request.userMessage):
                 full_response += chunk
@@ -274,6 +376,45 @@ async def agent_chat_v2(
     except ValueError as error:
         raise HTTPException(status_code=422, detail="valid generation fencing fields are required") from error
     return _build_chat_stream_response(request)
+
+
+@app.post(
+    "/api/agent/v2/context-summary",
+    response_model=ContextSummaryResponse,
+)
+async def summarize_chat_context(
+    request: ContextSummaryRequest,
+    _authorized: None = Depends(require_internal_token),
+):
+    if request.prompt_version != CONTEXT_SUMMARY_PROMPT_VERSION:
+        raise HTTPException(status_code=422, detail="unsupported prompt version")
+
+    try:
+        summary = await context_summary_service.summarize(
+            request.previous_summary,
+            [message.model_dump(by_alias=True) for message in request.messages],
+            user_id=request.user_id,
+        )
+    except ContextSummaryInputError as error:
+        raise HTTPException(status_code=422, detail=error.code) from error
+    except ContextSummaryOutputError as error:
+        raise HTTPException(status_code=502, detail=error.code) from error
+    except (LLMQueueTimeout, LLMRequestTimeout, ProviderCircuitOpen) as error:
+        raise HTTPException(status_code=503, detail=type(error).__name__) from error
+    except Exception as error:
+        logger.warning(
+            "context_summary_failed error_type=%s", type(error).__name__
+        )
+        raise HTTPException(status_code=502, detail="context summary unavailable") from error
+
+    covered_through_message_id = max(
+        (message.id for message in request.messages), default=None
+    )
+    return ContextSummaryResponse(
+        summary=summary,
+        coveredThroughMessageId=covered_through_message_id,
+        promptVersion=CONTEXT_SUMMARY_PROMPT_VERSION,
+    )
 
 
 @app.post("/api/agent/emotion/analyze")
