@@ -95,6 +95,32 @@ async def test_context_summary_route_returns_versioned_schema_without_checkpoint
 
 
 @pytest.mark.asyncio
+async def test_context_summary_route_accepts_spring_numeric_session_id(client, monkeypatch):
+    output = {
+        "userStatedContext": [],
+        "userPreferences": [],
+        "openTopics": [],
+    }
+    monkeypatch.setattr(
+        app_module,
+        "context_summary_service",
+        ContextSummaryService(FakeModel(json.dumps(output))),
+        raising=False,
+    )
+    request = summary_request()
+    request["sessionId"] = 17
+
+    response = await client.post(
+        "/api/agent/v2/context-summary",
+        json=request,
+        headers={"X-Agent-Token": "unit-test-agent-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["coveredThroughMessageId"] == 12
+
+
+@pytest.mark.asyncio
 async def test_context_summary_route_rejects_unknown_model_source_ids(client, monkeypatch):
     model = FakeModel(
         '{"userStatedContext":[{"text":"未经支持的结论",'

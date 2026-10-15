@@ -13,11 +13,13 @@ from typing import Any, Dict, List, Optional
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 from redis import asyncio as redis_async
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 import config
 from services.agent_service import agent_chat_service
+from services.agent_metrics import AGENT_METRICS_REGISTRY
 from services.context_summary_service import (
     ContextSummary,
     ContextSummaryInputError,
@@ -92,6 +94,15 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="AI Mental Health Agent", version="1.0.0", lifespan=lifespan)
 app.state.ready = False
 app.state.checkpointer = None
+
+
+@app.get("/metrics", include_in_schema=False)
+async def agent_metrics():
+    """Prometheus exposition; deployments must keep this route on the internal network."""
+    return Response(
+        content=generate_latest(AGENT_METRICS_REGISTRY),
+        media_type=CONTENT_TYPE_LATEST,
+    )
 
 
 class JsonBodySizeLimitMiddleware:

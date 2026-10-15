@@ -20,6 +20,7 @@ from services.llm_governance import (
     LLMRequestTimeout,
     llm_call_governor,
 )
+from services.agent_metrics import record_agent_turn_deadline
 from services.checkpoint_config import build_checkpoint_run_config
 from services.session_lifecycle import SessionLifecycleGuard
 from services.rag_service import rag_service
@@ -360,6 +361,7 @@ class AgentChatService:
             except (LLMQueueTimeout, LLMRequestTimeout):
                 raise
             except asyncio.TimeoutError as error:
+                record_agent_turn_deadline()
                 raise AgentTurnTimeout("Agent turn deadline exceeded") from error
 
         for offset in range(0, len(final_text), 32):

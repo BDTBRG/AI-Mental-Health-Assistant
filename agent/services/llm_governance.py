@@ -7,6 +7,7 @@ from collections import defaultdict, deque
 from typing import Any, Dict, List
 
 import config
+from services.agent_metrics import observe_llm_queue_wait, record_llm_queue_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,8 @@ class LLMCallGovernor:
 
         context = request_context or {}
         started = time.monotonic()
+        queue_started = started
+        queue_wait_recorded = False
         acquired_slots = []
         try:
             loop = asyncio.get_running_loop()
@@ -51,6 +54,8 @@ class LLMCallGovernor:
                 acquired_slots.append(self._summary_slots)
             await self._acquire(self._slots, queue_deadline, loop)
             acquired_slots.append(self._slots)
+            observe_llm_queue_wait(stage, time.monotonic() - queue_started)
+            queue_wait_recorded = True
             self._enforce_user_limit(str(context.get("userId", "")), time.monotonic())
             try:
                 response = await asyncio.wait_for(
@@ -65,6 +70,11 @@ class LLMCallGovernor:
                 self._record_failure(time.monotonic())
                 self._log_failure(stage, prompt_version, context, started)
                 raise
+        except LLMQueueTimeout:
+            if not queue_wait_recorded:
+                observe_llm_queue_wait(stage, time.monotonic() - queue_started)
+            record_llm_queue_timeout(stage)
+            raise
         finally:
             for semaphore in reversed(acquired_slots):
                 semaphore.release()

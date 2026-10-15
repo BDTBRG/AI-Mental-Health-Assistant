@@ -14,11 +14,14 @@ import com.amha.mapper.ConsultationMessageMapper;
 import com.amha.mapper.ConsultationSessionMapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -35,7 +38,6 @@ public class ContextSummaryOutboxService {
     private static final int MAX_SUMMARY_JSON_CHARS = 12_000;
     private static final long MAX_BACKOFF_SECONDS = 900;
     private static final long DISPATCH_LEASE_SECONDS = 30;
-    private static final long PROCESSING_LEASE_SECONDS = 90;
     private static final TypeReference<Map<String, Object>> SUMMARY_TYPE = new TypeReference<>() {};
 
     private final ConsultationContextSummaryOutboxMapper outboxMapper;
@@ -44,10 +46,23 @@ public class ContextSummaryOutboxService {
     private final ConsultationSessionMapper sessionMapper;
     private final ObjectMapper objectMapper;
     private final ContextSummaryMetrics metrics;
+    @Value("${amha.chat.context-summary.processing-lease:PT90S}")
+    private Duration processingLease = Duration.ofSeconds(90);
+    @Value("${agent.context-summary-timeout-ms:65000}")
+    private long agentTimeoutMillis = 65_000;
 
     public record ContextSummaryClaim(Long outboxId, Long sessionId, Long userId,
                                       Long targetThroughMessageId, Long expectedSummaryVersion,
                                       String processingLeaseToken) {
+    }
+
+    @PostConstruct
+    void validateProcessingLease() {
+        if (agentTimeoutMillis <= 0
+                || processingLease.compareTo(Duration.ofMillis(agentTimeoutMillis + 25_000)) < 0) {
+            throw new IllegalStateException(
+                    "context summary processing lease must exceed the Agent timeout by at least 25 seconds");
+        }
     }
 
     @Transactional
@@ -154,7 +169,7 @@ public class ContextSummaryOutboxService {
         task.setStatus("PROCESSING");
         task.setAttemptCount(value(task.getAttemptCount()) + 1);
         task.setLeaseToken(leaseToken);
-        task.setLeaseUntil(now.plusSeconds(PROCESSING_LEASE_SECONDS));
+        task.setLeaseUntil(now.plus(processingLease));
         task.setUpdatedAt(now);
         outboxMapper.updateById(task);
         return new ContextSummaryClaim(task.getId(), task.getSessionId(), task.getUserId(),
@@ -203,7 +218,7 @@ public class ContextSummaryOutboxService {
             throw new BusinessException("CONTEXT_UNAVAILABLE", "当前摘要水位没有可处理的消息");
         }
 
-        Map<String, Object> previousSummary = Map.of();
+        Map<String, Object> previousSummary = null;
         if (summary != null && summary.getSummaryJson() != null && !summary.getSummaryJson().isBlank()) {
             if (summary.getSummaryJson().codePointCount(0, summary.getSummaryJson().length())
                     > MAX_SUMMARY_JSON_CHARS) {

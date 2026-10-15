@@ -1,6 +1,7 @@
 """Strict, bounded context summaries for long-running chat sessions."""
 
 import json
+import time
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -17,6 +18,7 @@ from prompts.context_summary_prompt import (
     CONTEXT_SUMMARY_PROMPT_VERSION,
     CONTEXT_SUMMARY_SYSTEM_PROMPT,
 )
+from services.agent_metrics import observe_context_summary_duration
 
 MAX_SUMMARY_ITEMS_PER_FIELD = 8
 MAX_SUMMARY_ITEM_CHARS = 240
@@ -110,7 +112,9 @@ class ContextSummaryMessage(BaseModel):
 class ContextSummaryRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True, strict=True)
 
-    session_id: str = Field(alias="sessionId", min_length=1, max_length=128)
+    # Spring serializes the numeric database key as JSON number; accept it strictly
+    # alongside string IDs used by direct Agent clients.
+    session_id: str | int = Field(alias="sessionId")
     user_id: str | int = Field(alias="userId")
     previous_summary: ContextSummary | None = Field(
         default=None, alias="previousSummary"
@@ -118,6 +122,15 @@ class ContextSummaryRequest(BaseModel):
     messages: list[ContextSummaryMessage] = Field(max_length=MAX_INPUT_MESSAGES)
     prompt_version: str = Field(alias="promptVersion", min_length=1, max_length=64)
     correlation_id: str = Field(alias="correlationId", min_length=1, max_length=128)
+
+    @field_validator("session_id")
+    @classmethod
+    def session_key_is_bounded(cls, value: str | int) -> str | int:
+        if isinstance(value, int) and value <= 0:
+            raise ValueError("sessionId must be positive")
+        if isinstance(value, str) and (not value.strip() or len(value) > 128):
+            raise ValueError("sessionId must be non-empty and at most 128 characters")
+        return value
 
     @model_validator(mode="after")
     def messages_are_unique_and_bounded(self) -> "ContextSummaryRequest":
@@ -169,17 +182,21 @@ class ContextSummaryService:
             SystemMessage(content=CONTEXT_SUMMARY_SYSTEM_PROMPT),
             HumanMessage(content=json.dumps(prompt_data, ensure_ascii=False)),
         ]
-        if self.governor is None:
-            response = await self.model.ainvoke(prompt_messages)
-        else:
-            response = await self.governor.invoke(
-                self.model,
-                prompt_messages,
-                "context-summary",
-                {"userId": str(user_id) if user_id is not None else ""},
-                CONTEXT_SUMMARY_PROMPT_VERSION,
-            )
-        return self._parse_output(getattr(response, "content", None), allowed_source_ids)
+        started = time.perf_counter()
+        try:
+            if self.governor is None:
+                response = await self.model.ainvoke(prompt_messages)
+            else:
+                response = await self.governor.invoke(
+                    self.model,
+                    prompt_messages,
+                    "context-summary",
+                    {"userId": str(user_id) if user_id is not None else ""},
+                    CONTEXT_SUMMARY_PROMPT_VERSION,
+                )
+            return self._parse_output(getattr(response, "content", None), allowed_source_ids)
+        finally:
+            observe_context_summary_duration(time.perf_counter() - started)
 
     @staticmethod
     def _parse_previous_summary(

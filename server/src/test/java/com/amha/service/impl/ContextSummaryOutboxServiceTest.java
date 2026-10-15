@@ -188,6 +188,23 @@ class ContextSummaryOutboxServiceTest {
     }
 
     @Test
+    void firstSummaryRequestUsesNullInsteadOfAnInvalidEmptyPreviousSummary() {
+        ContextSummaryOutboxService service = service();
+        ContextSummaryOutboxService.ContextSummaryClaim claim =
+                new ContextSummaryOutboxService.ContextSummaryClaim(30L, 10L, 7L, 100L, 0L, "processing-lease");
+        when(sessionMapper.selectByIdForUpdate(10L)).thenReturn(session(10L, 7L));
+        when(outboxMapper.selectByIdForUpdate(30L))
+                .thenReturn(task(30L, 10L, 7L, 100L, "PROCESSING", "processing-lease"));
+        when(summaryMapper.selectBySessionAndUserForUpdate(10L, 7L)).thenReturn(null);
+        when(messageMapper.selectWindowAfterWatermark(10L, 0L, 100L, 40))
+                .thenReturn(List.of(message(11L, 10L, "first summary message")));
+
+        ContextSummaryAgentRequest request = service.loadRequest(claim, 40, 16_000);
+
+        assertNull(request.previousSummary());
+    }
+
+    @Test
     void staleProcessingLeaseCannotCompleteOrOverwriteTheSummary() {
         ContextSummaryOutboxService service = service();
         when(sessionMapper.selectByIdForUpdate(10L)).thenReturn(session(10L, 7L));

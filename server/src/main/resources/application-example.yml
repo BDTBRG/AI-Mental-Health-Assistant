@@ -29,6 +29,18 @@ app:
     pending-reclaim-batch-size: ${APP_OUTBOX_PENDING_RECLAIM_BATCH_SIZE:10}
     pending-reclaim-interval-ms: ${APP_OUTBOX_PENDING_RECLAIM_INTERVAL_MS:30000}
 
+amha:
+  chat:
+    context-summary:
+      preflight-enabled: ${AMHA_CHAT_CONTEXT_SUMMARY_PREFLIGHT_ENABLED:false}
+      worker-enabled: ${AMHA_CHAT_CONTEXT_SUMMARY_WORKER_ENABLED:false}
+      agent-enabled: ${AMHA_CHAT_CONTEXT_SUMMARY_AGENT_ENABLED:false}
+      stream-key: ${AMHA_CHAT_CONTEXT_SUMMARY_STREAM_KEY:amha:outbox:context-summary}
+      dispatch-interval-ms: ${AMHA_CHAT_CONTEXT_SUMMARY_DISPATCH_INTERVAL_MS:2000}
+      batch-max-messages: ${AMHA_CHAT_CONTEXT_SUMMARY_BATCH_MAX_MESSAGES:40}
+      batch-max-chars: ${AMHA_CHAT_CONTEXT_SUMMARY_BATCH_MAX_CHARS:16000}
+      processing-lease: ${AMHA_CHAT_CONTEXT_SUMMARY_PROCESSING_LEASE:PT90S}
+
 server:
   port: 8080
   shutdown: graceful
@@ -69,6 +81,8 @@ file:
 agent:
   base-url: ${AGENT_BASE_URL:http://localhost:5000}
   internal-token: ${AGENT_INTERNAL_TOKEN:}
+  chat-timeout-ms: ${AGENT_CHAT_TIMEOUT_MS:270000}
+  context-summary-timeout-ms: ${AGENT_CONTEXT_SUMMARY_TIMEOUT_MS:65000}
 
 management:
   endpoints:
