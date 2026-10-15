@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS `consultation_chat_turn` (
     `request_hash` CHAR(64) NOT NULL,
     `status` VARCHAR(20) NOT NULL DEFAULT 'RUNNING',
     `generation_token` CHAR(36) NOT NULL,
+    `generation_epoch` BIGINT NOT NULL DEFAULT 0,
     `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),

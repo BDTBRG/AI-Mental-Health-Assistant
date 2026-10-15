@@ -49,13 +49,18 @@ class RealChatAgentContractTest {
                     "http://127.0.0.1:" + server.getAddress().getPort(), "unit-token");
 
             List<String> response = chatAgent.streamResponse(
-                            17L, "hello", List.of(), Map.of("generationToken", "generation-7"))
+                            17L, "hello", List.of(), Map.of(
+                                    "generationToken", "generation-7",
+                                    "generationEpoch", 3,
+                                    "turnSequence", 17))
                     .collectList()
                     .block(Duration.ofSeconds(5));
 
             assertEquals(List.of("ok"), response);
             assertEquals("/api/agent/v2/chat", requestPath.get());
             assertTrue(requestBody.get().contains("\"generationToken\":\"generation-7\""));
+            assertTrue(requestBody.get().contains("\"generationEpoch\":3"));
+            assertTrue(requestBody.get().contains("\"turnSequence\":17"));
             assertEquals("unit-token", agentToken.get());
         } finally {
             server.stop(0);

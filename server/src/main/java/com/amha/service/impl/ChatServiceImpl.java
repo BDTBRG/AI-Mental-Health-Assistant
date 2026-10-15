@@ -152,6 +152,7 @@ public class ChatServiceImpl implements ChatService {
             firstTurn.setRequestHash(sha256(initialMessage));
             firstTurn.setStatus("PENDING");
             firstTurn.setGenerationToken(UUID.randomUUID().toString());
+            firstTurn.setGenerationEpoch(0L);
             firstTurn.setCreatedAt(now);
             firstTurn.setUpdatedAt(now);
             chatTurnMapper.insert(firstTurn);
@@ -358,6 +359,8 @@ public class ChatServiceImpl implements ChatService {
             Map<String, Object> agentContext = new java.util.LinkedHashMap<>(buildAgentContext(userId));
             agentContext.put("sessionId", sessionId.toString());
             agentContext.put("turnId", turnRequestId);
+            agentContext.put("turnSequence", turnStart.turnSequence());
+            agentContext.put("generationEpoch", turnStart.generationEpoch());
             agentContext.put("generationToken", turnStart.generationToken());
             agentContext.put("userId", userId.toString());
             Flux<String> response = chatAgent.streamResponse(sessionId, userMessage, history,

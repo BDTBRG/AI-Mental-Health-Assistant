@@ -198,6 +198,83 @@ async def test_model_echo_of_personal_tool_result_is_retained_in_checkpoint(monk
     assert private_value in checkpoint["final_text"]
 
 
+@pytest.mark.asyncio
+async def test_late_old_generation_cannot_replace_new_checkpoint(monkeypatch):
+    service = AgentChatService.__new__(AgentChatService)
+    service.llm_with_tools = object()
+    service.base_llm = object()
+    service.configure_checkpointer(InMemorySaver(), SessionLifecycleGuard("sqlite"))
+    governor = PersonalizationGovernor("unused-private-memory")
+    monkeypatch.setattr(agent_service_module, "llm_call_governor", governor)
+    monkeypatch.setattr(
+        agent_service_module.rag_service,
+        "refresh_shared_index_state",
+        lambda: {"index_version": "test-index"},
+    )
+
+    new_context = {
+        "sessionId": "session-34",
+        "turnId": "turn-34",
+        "turnSequence": 1204,
+        "generationToken": "generation-new",
+        "generationEpoch": 2,
+        "userId": "user-12",
+        "personalizationEnabled": True,
+        "approvedMemories": [{
+            "content": "unused-private-memory",
+            "source": "用户主动添加",
+        }],
+    }
+    token = CURRENT_AGENT_CONTEXT.set(new_context)
+    try:
+        new_chunks = [chunk async for chunk in service.stream_chat([], "请给我一些建议")]
+    finally:
+        CURRENT_AGENT_CONTEXT.reset(token)
+
+    stale_contexts = [
+        {**new_context, "generationToken": "generation-old", "generationEpoch": 1},
+        {
+            **{
+                key: value
+                for key, value in new_context.items()
+                if key not in {"generationEpoch", "turnSequence"}
+            },
+            "generationToken": "generation-legacy",
+        },
+        {
+            **new_context,
+            "turnId": "turn-33",
+            "turnSequence": 1203,
+            "generationEpoch": 99,
+        },
+    ]
+    for stale_context in stale_contexts:
+        token = CURRENT_AGENT_CONTEXT.set(stale_context)
+        try:
+            with pytest.raises(RuntimeError, match="stale generation"):
+                [chunk async for chunk in service.stream_chat([], "请给我一些建议")]
+        finally:
+            CURRENT_AGENT_CONTEXT.reset(token)
+
+    latest_checkpoint = await service.checkpointer.aget_tuple(
+        build_checkpoint_run_config("session-34")
+    )
+    retry_token = CURRENT_AGENT_CONTEXT.set(new_context)
+    try:
+        new_retry_chunks = [
+            chunk async for chunk in service.stream_chat([], "请给我一些建议")
+        ]
+    finally:
+        CURRENT_AGENT_CONTEXT.reset(retry_token)
+
+    saved_state = latest_checkpoint.checkpoint["channel_values"]
+    assert "".join(new_chunks) == "我会尽量给你简短的支持建议。"
+    assert "".join(new_retry_chunks) == "我会尽量给你简短的支持建议。"
+    assert saved_state["generation_epoch"] == 2
+    assert saved_state["generation_token"] == "generation-new"
+    assert len(governor.calls) == 2
+
+
 @pytest.mark.parametrize(
     ("tool_name", "tool_args", "request_values", "private_value"),
     [

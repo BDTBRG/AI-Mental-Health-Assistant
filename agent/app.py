@@ -18,7 +18,10 @@ from pydantic import BaseModel, Field
 from redis import asyncio as redis_async
 import config
 from services.agent_service import agent_chat_service
-from services.checkpoint_config import require_generation_token
+from services.checkpoint_config import (
+    require_generation_token,
+    normalize_generation_fencing_fields,
+)
 from services.checkpointer import open_checkpointer
 from services.session_lifecycle import open_session_lifecycle_guard
 from services.emotion_service import emotion_service
@@ -252,6 +255,12 @@ def _build_chat_stream_response(request: ChatRequest) -> StreamingResponse:
 async def agent_chat_legacy(
     request: ChatRequest, _authorized: None = Depends(require_internal_token)
 ):
+    try:
+        if "generationToken" in request.context:
+            request.context["generationToken"] = require_generation_token(request.context)
+        request.context.update(normalize_generation_fencing_fields(request.context))
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="valid generation fencing fields are required") from error
     return _build_chat_stream_response(request)
 
 
@@ -261,8 +270,9 @@ async def agent_chat_v2(
 ):
     try:
         request.context["generationToken"] = require_generation_token(request.context)
+        request.context.update(normalize_generation_fencing_fields(request.context))
     except ValueError as error:
-        raise HTTPException(status_code=422, detail="generationToken is required") from error
+        raise HTTPException(status_code=422, detail="valid generation fencing fields are required") from error
     return _build_chat_stream_response(request)
 
 

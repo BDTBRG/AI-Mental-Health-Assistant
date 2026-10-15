@@ -19,6 +19,7 @@ public class ConsultationChatTurn {
     private String requestHash;
     private String status;
     private String generationToken;
+    private Long generationEpoch;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 }

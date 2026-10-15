@@ -43,6 +43,8 @@ class AgentState(TypedDict):
     latest_user_message: str
     pending_safety_clarification: Literal["risk_intent", "safe_location"] | None
     turn_id: str
+    turn_sequence: int
+    generation_epoch: int
     generation_token: str
     retrieved_sources: List[Tuple[str, str]]
     knowledge_retrieved: bool
@@ -311,6 +313,8 @@ class AgentChatService:
         session_id = str(context.get("sessionId", "agent-session"))
         turn_id = str(context.get("turnId", "agent-turn"))
         generation_token = context.get("generationToken")
+        turn_sequence = int(context.get("turnSequence") or 0)
+        generation_epoch = int(context.get("generationEpoch") or 0)
         run_config = build_checkpoint_run_config(session_id)
         runtime_context = AgentRequestContext(values=dict(context))
 
@@ -319,7 +323,13 @@ class AgentChatService:
         # graph's last checkpoint write.
         async with self.session_lifecycle.execution(session_id):
             final_text = await self._resolve_final_text(
-                messages, user_message, runtime_context, turn_id, run_config
+                messages,
+                user_message,
+                runtime_context,
+                turn_id,
+                turn_sequence,
+                generation_epoch,
+                run_config,
             )
 
         for offset in range(0, len(final_text), 32):
@@ -331,6 +341,8 @@ class AgentChatService:
         user_message: str,
         context: AgentRequestContext,
         turn_id: str,
+        turn_sequence: int,
+        generation_epoch: int,
         run_config: Dict[str, Any],
     ) -> str:
 
@@ -341,7 +353,13 @@ class AgentChatService:
             snapshot.checkpoint.get("channel_values", {}) if snapshot is not None else {}
         )
         generation_token = str(context.values.get("generationToken") or turn_id)
+        saved_sequence = int(snapshot_values.get("turn_sequence") or 0)
+        saved_epoch = int(snapshot_values.get("generation_epoch") or 0)
+        if (saved_sequence, saved_epoch) > (turn_sequence, generation_epoch):
+            raise RuntimeError("stale generation request cannot update session checkpoint")
         if (snapshot_values.get("turn_id") == turn_id
+                and saved_sequence == turn_sequence
+                and saved_epoch == generation_epoch
                 and snapshot_values.get("generation_token") == generation_token
                 and snapshot_values.get("final_text")):
             if snapshot_values.get("blocked"):
@@ -387,6 +405,8 @@ class AgentChatService:
                 "latest_user_message": user_message,
                 "pending_safety_clarification": pending_safety_clarification,
                 "turn_id": turn_id,
+                "turn_sequence": turn_sequence,
+                "generation_epoch": generation_epoch,
                 "generation_token": generation_token,
                 "retrieved_sources": [],
                 "knowledge_retrieved": False,

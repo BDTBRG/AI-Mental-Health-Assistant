@@ -22,7 +22,12 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class ChatTurnStore {
 
-    public record TurnStart(boolean shouldGenerate, String generationToken) {}
+    public record TurnStart(
+            boolean shouldGenerate,
+            String generationToken,
+            Long turnSequence,
+            long generationEpoch
+    ) {}
 
     private final ConsultationChatTurnMapper turnMapper;
     private final ConsultationStreamEventMapper eventMapper;
@@ -47,11 +52,13 @@ public class ChatTurnStore {
             }
             if ("PENDING".equals(existing.getStatus())) {
                 String generationToken = UUID.randomUUID().toString();
+                long generationEpoch = nextGenerationEpoch(existing);
                 existing.setStatus("RUNNING");
                 existing.setGenerationToken(generationToken);
+                existing.setGenerationEpoch(generationEpoch);
                 existing.setUpdatedAt(LocalDateTime.now());
                 turnMapper.updateById(existing);
-                return new TurnStart(true, generationToken);
+                return new TurnStart(true, generationToken, existing.getId(), generationEpoch);
             }
             if ("RUNNING".equals(existing.getStatus()) && existing.getUpdatedAt() != null
                     && !existing.getUpdatedAt().isAfter(LocalDateTime.now().minusMinutes(5))) {
@@ -60,12 +67,15 @@ public class ChatTurnStore {
                 insertEvent(sessionId, requestId, resetSequence, "reset",
                         "{\"code\":\"200\",\"data\":{\"reset\":true}}");
                 String generationToken = UUID.randomUUID().toString();
+                long generationEpoch = nextGenerationEpoch(existing);
                 existing.setGenerationToken(generationToken);
+                existing.setGenerationEpoch(generationEpoch);
                 existing.setUpdatedAt(LocalDateTime.now());
                 turnMapper.updateById(existing);
-                return new TurnStart(true, generationToken);
+                return new TurnStart(true, generationToken, existing.getId(), generationEpoch);
             }
-            return new TurnStart(false, existing.getGenerationToken());
+            return new TurnStart(false, existing.getGenerationToken(),
+                    existing.getId(), existing.getGenerationEpoch() == null ? 0L : existing.getGenerationEpoch());
         }
 
         ConsultationChatTurn activeTurn = turnMapper.selectActiveBySessionForUpdate(sessionId);
@@ -92,6 +102,7 @@ public class ChatTurnStore {
         turn.setRequestHash(requestHash);
         turn.setStatus("RUNNING");
         turn.setGenerationToken(UUID.randomUUID().toString());
+        turn.setGenerationEpoch(1L);
         turn.setCreatedAt(now);
         turn.setUpdatedAt(now);
         turnMapper.insert(turn);
@@ -106,7 +117,7 @@ public class ChatTurnStore {
         session.setLastMessageContent(userMessage);
         session.setLastMessageTime(now);
         sessionMapper.updateById(session);
-        return new TurnStart(true, turn.getGenerationToken());
+        return new TurnStart(true, turn.getGenerationToken(), turn.getId(), turn.getGenerationEpoch());
     }
 
     @Transactional
@@ -197,6 +208,10 @@ public class ChatTurnStore {
     private boolean isCurrentGeneration(ConsultationChatTurn turn, String generationToken) {
         return turn != null && "RUNNING".equals(turn.getStatus())
                 && generationToken != null && generationToken.equals(turn.getGenerationToken());
+    }
+
+    private long nextGenerationEpoch(ConsultationChatTurn turn) {
+        return Math.addExact(turn.getGenerationEpoch() == null ? 0L : turn.getGenerationEpoch(), 1L);
     }
 
     private void insertEvent(Long sessionId, String requestId, int sequence,

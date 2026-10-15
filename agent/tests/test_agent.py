@@ -214,7 +214,12 @@ class TestChat:
             "sessionId": "test-generation-route",
             "messages": [],
             "userMessage": "Hello",
-            "context": {"generationToken": "generation-1", "turnId": "turn-1"},
+            "context": {
+                "generationToken": "generation-1",
+                "generationEpoch": 1,
+                "turnSequence": 1,
+                "turnId": "turn-1",
+            },
         }
 
         response = await client.post("/api/agent/v2/chat", json=body)
@@ -224,12 +229,51 @@ class TestChat:
         assert last["data"]["done"] is True
         assert last["data"]["fullResponse"] == "mocked response"
 
+    async def test_generation_aware_route_accepts_legacy_token_only_clients(self, client):
+        response = await client.post("/api/agent/v2/chat", json={
+            "sessionId": "test-generation-route-legacy",
+            "messages": [],
+            "userMessage": "Hello",
+            "context": {"generationToken": "generation-legacy", "turnId": "turn-legacy"},
+        })
+
+        assert response.status_code == 200
+        last = json.loads(response.text.strip().split("\n")[-1])
+        assert last["data"]["fullResponse"] == "mocked response"
+
     async def test_generation_aware_route_rejects_missing_generation_token(self, client):
         response = await client.post("/api/agent/v2/chat", json={
             "sessionId": "test-generation-route-missing-token",
             "messages": [],
             "userMessage": "Hello",
             "context": {"turnId": "turn-1"},
+        })
+
+        assert response.status_code == 422
+
+    @pytest.mark.parametrize("field", ["generationEpoch", "turnSequence"])
+    async def test_generation_aware_route_requires_positive_fencing_fields(self, client, field):
+        context = {
+            "generationToken": "generation-1",
+            "generationEpoch": 1,
+            "turnSequence": 1,
+        }
+        context[field] = 0
+        response = await client.post("/api/agent/v2/chat", json={
+            "sessionId": "test-generation-route-invalid-fence",
+            "messages": [],
+            "userMessage": "Hello",
+            "context": context,
+        })
+
+        assert response.status_code == 422
+
+    async def test_legacy_chat_route_rejects_invalid_optional_fencing_fields(self, client):
+        response = await client.post("/api/agent/chat", json={
+            "sessionId": "test-generation-route-legacy-invalid",
+            "messages": [],
+            "userMessage": "Hello",
+            "context": {"generationEpoch": 9_223_372_036_854_775_808},
         })
 
         assert response.status_code == 422

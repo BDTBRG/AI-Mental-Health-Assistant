@@ -650,6 +650,13 @@ class ChatControllerTest {
                 testSessionId, ownerId, requestId, sha256(userMessage), userMessage);
         chatTurnStore.appendChunk(testSessionId, requestId, oldGeneration.generationToken(), 0,
                 "{\"code\":\"200\",\"data\":{\"content\":\"old-fragment\"}}");
+        Long oldGenerationEpoch = jdbcTemplate.queryForObject(
+                "SELECT generation_epoch FROM consultation_chat_turn WHERE session_id = ? "
+                        + "AND client_request_id = ?",
+                Long.class, testSessionId, requestId);
+        Long turnSequence = jdbcTemplate.queryForObject(
+                "SELECT id FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                Long.class, testSessionId, requestId);
         jdbcTemplate.update("UPDATE consultation_chat_turn SET updated_at = DATEADD('MINUTE', -10, CURRENT_TIMESTAMP) "
                 + "WHERE session_id = ? AND client_request_id = ?", testSessionId, requestId);
 
@@ -675,9 +682,18 @@ class ChatControllerTest {
                 "SELECT generation_token FROM consultation_chat_turn WHERE session_id = ? "
                         + "AND client_request_id = ?",
                 String.class, testSessionId, requestId);
+        Long currentGenerationEpoch = jdbcTemplate.queryForObject(
+                "SELECT generation_epoch FROM consultation_chat_turn WHERE session_id = ? "
+                        + "AND client_request_id = ?",
+                Long.class, testSessionId, requestId);
         Assertions.assertNotEquals(oldGeneration.generationToken(), currentGenerationToken);
+        Assertions.assertEquals(oldGenerationEpoch + 1L, currentGenerationEpoch);
         Assertions.assertEquals(currentGenerationToken,
                 agentContextCaptor.getValue().get("generationToken"));
+        Assertions.assertEquals(currentGenerationEpoch,
+                agentContextCaptor.getValue().get("generationEpoch"));
+        Assertions.assertEquals(turnSequence,
+                agentContextCaptor.getValue().get("turnSequence"));
         MvcResult recovered = mockMvc.perform(post("/psychological-chat/stream")
                         .header("token", userToken)
                         .header("Last-Event-ID", "0")
