@@ -358,6 +358,7 @@ public class ChatServiceImpl implements ChatService {
             Map<String, Object> agentContext = new java.util.LinkedHashMap<>(buildAgentContext(userId));
             agentContext.put("sessionId", sessionId.toString());
             agentContext.put("turnId", turnRequestId);
+            agentContext.put("generationToken", turnStart.generationToken());
             agentContext.put("userId", userId.toString());
             Flux<String> response = chatAgent.streamResponse(sessionId, userMessage, history,
                     agentContext);

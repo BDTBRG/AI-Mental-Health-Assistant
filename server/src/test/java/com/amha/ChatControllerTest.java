@@ -13,6 +13,7 @@ import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
+import org.mockito.ArgumentCaptor;
 import com.amha.service.impl.EmotionAnalysisOutboxService;
 import com.amha.service.impl.ChatTurnStore;
 import com.amha.service.impl.KnowledgeIndexOutboxService;
@@ -667,6 +668,16 @@ class ChatControllerTest {
                 .andExpect(status().isOk())
                 .andReturn();
         awaitTurnCompletion(testSessionId, requestId);
+        ArgumentCaptor<Map> agentContextCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(realChatAgent, times(1)).streamResponse(
+                anyLong(), anyString(), anyList(), agentContextCaptor.capture());
+        String currentGenerationToken = jdbcTemplate.queryForObject(
+                "SELECT generation_token FROM consultation_chat_turn WHERE session_id = ? "
+                        + "AND client_request_id = ?",
+                String.class, testSessionId, requestId);
+        Assertions.assertNotEquals(oldGeneration.generationToken(), currentGenerationToken);
+        Assertions.assertEquals(currentGenerationToken,
+                agentContextCaptor.getValue().get("generationToken"));
         MvcResult recovered = mockMvc.perform(post("/psychological-chat/stream")
                         .header("token", userToken)
                         .header("Last-Event-ID", "0")

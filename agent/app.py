@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from redis import asyncio as redis_async
 import config
 from services.agent_service import agent_chat_service
+from services.checkpoint_config import require_generation_token
 from services.checkpointer import open_checkpointer
 from services.emotion_service import emotion_service
 from services.diary_service import diary_service
@@ -178,8 +179,7 @@ async def delete_session_checkpoint(session_id: str, x_agent_token: str = Header
     return {"code": "200", "data": {"deleted": True}}
 
 
-@app.post("/api/agent/chat")
-async def agent_chat(request: ChatRequest, _authorized: None = Depends(require_internal_token)):
+def _build_chat_stream_response(request: ChatRequest) -> StreamingResponse:
     messages_dict = [{"senderType": m.senderType, "content": m.content} for m in request.messages]
 
     async def generate_lines():
@@ -216,6 +216,24 @@ async def agent_chat(request: ChatRequest, _authorized: None = Depends(require_i
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     )
+
+
+@app.post("/api/agent/chat", include_in_schema=False)
+async def agent_chat_legacy(
+    request: ChatRequest, _authorized: None = Depends(require_internal_token)
+):
+    return _build_chat_stream_response(request)
+
+
+@app.post("/api/agent/v2/chat")
+async def agent_chat_v2(
+    request: ChatRequest, _authorized: None = Depends(require_internal_token)
+):
+    try:
+        request.context["generationToken"] = require_generation_token(request.context)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="generationToken is required") from error
+    return _build_chat_stream_response(request)
 
 
 @app.post("/api/agent/emotion/analyze")

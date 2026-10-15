@@ -13,6 +13,7 @@ import config
 from prompts.chat_prompt import CHAT_SYSTEM_PROMPT
 from services.safety_service import safety_service
 from services.llm_governance import llm_call_governor
+from services.checkpoint_config import build_checkpoint_run_config
 from services.rag_service import rag_service
 from tools.mental_health_tools import (
     ALL_TOOLS,
@@ -245,7 +246,8 @@ class AgentChatService:
         context = CURRENT_AGENT_CONTEXT.get() or {}
         session_id = str(context.get("sessionId", "agent-session"))
         turn_id = str(context.get("turnId", "agent-turn"))
-        run_config = {"configurable": {"thread_id": session_id}}
+        generation_token = context.get("generationToken")
+        run_config = build_checkpoint_run_config(session_id, generation_token, turn_id)
 
         # The SQL stream store is authoritative for completed turns. This checkpoint
         # cache prevents an Agent retry from calling the provider twice for one turn.

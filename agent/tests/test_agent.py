@@ -174,6 +174,31 @@ class TestChat:
         assert last["data"]["done"] is True
         assert last["data"]["fullResponse"] == "mocked response"
 
+    async def test_generation_aware_route_is_available_for_fenced_clients(self, client):
+        body = {
+            "sessionId": "test-generation-route",
+            "messages": [],
+            "userMessage": "Hello",
+            "context": {"generationToken": "generation-1", "turnId": "turn-1"},
+        }
+
+        response = await client.post("/api/agent/v2/chat", json=body)
+
+        assert response.status_code == 200
+        last = json.loads(response.text.strip().split("\n")[-1])
+        assert last["data"]["done"] is True
+        assert last["data"]["fullResponse"] == "mocked response"
+
+    async def test_generation_aware_route_rejects_missing_generation_token(self, client):
+        response = await client.post("/api/agent/v2/chat", json={
+            "sessionId": "test-generation-route-missing-token",
+            "messages": [],
+            "userMessage": "Hello",
+            "context": {"turnId": "turn-1"},
+        })
+
+        assert response.status_code == 422
+
     async def test_protected_endpoint_rejects_missing_or_invalid_token(self, client):
         response = await client.get(
             "/api/agent/rag/stats",

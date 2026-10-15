@@ -57,7 +57,7 @@ public class RealChatAgent implements ChatAgent {
         requestBody.put("context", context == null ? Map.of() : context);
 
         return webClient.post()
-                .uri("/api/agent/chat")
+                .uri("/api/agent/v2/chat")
                 .header("X-Agent-Token", internalToken)
                 .bodyValue(requestBody)
                 .retrieve()
