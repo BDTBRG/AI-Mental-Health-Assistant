@@ -1,4 +1,4 @@
-"""Build LangGraph checkpoint identities for isolated Agent executions."""
+"""Build LangGraph checkpoint identities at the session thread boundary."""
 
 
 def require_generation_token(context):
@@ -9,13 +9,7 @@ def require_generation_token(context):
     return token.strip()
 
 
-def build_checkpoint_run_config(session_id, generation_token=None, turn_id=None):
-    """Keep a session as purge boundary and use a stable execution namespace."""
+def build_checkpoint_run_config(session_id):
+    """Use LangGraph's root namespace; generation fencing lives in saved state."""
     normalized_session_id = str(session_id or "agent-session")
-    normalized_generation = str(generation_token or turn_id or "agent-generation")
-    return {
-        "configurable": {
-            "thread_id": normalized_session_id,
-            "checkpoint_ns": normalized_generation,
-        }
-    }
+    return {"configurable": {"thread_id": normalized_session_id}}

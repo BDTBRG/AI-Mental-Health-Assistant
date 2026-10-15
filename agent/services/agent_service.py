@@ -3,11 +3,13 @@
 import logging
 import hashlib
 import asyncio
+from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Dict, List, Literal, Tuple, TypedDict
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
+from langgraph.runtime import Runtime
 
 import config
 from prompts.chat_prompt import CHAT_SYSTEM_PROMPT
@@ -27,13 +29,21 @@ from services.citation_service import review_source_citations
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class AgentRequestContext:
+    """Ephemeral request data passed to graph nodes but never checkpointed."""
+
+    values: Dict[str, Any]
+    ephemeral_tool_outputs: Dict[str, str] = field(default_factory=dict)
+
+
 class AgentState(TypedDict):
     # Replaced with the authoritative Java history at the start of each turn.
     messages: List[Any]
     latest_user_message: str
     pending_safety_clarification: Literal["risk_intent", "safe_location"] | None
     turn_id: str
-    agent_context: Dict[str, Any]
+    generation_token: str
     retrieved_sources: List[Tuple[str, str]]
     knowledge_retrieved: bool
     tool_rounds: int
@@ -45,6 +55,7 @@ class AgentChatService:
     """Orchestrates safety, tool decisions, retrieval and output review as graph nodes."""
 
     MAX_TOOL_CALLS = 3
+    PRIVATE_CONTEXT_TOOLS = frozenset({"get_emotion_history", "get_user_memories"})
 
     def __init__(self):
         self.base_llm = ChatOpenAI(
@@ -64,7 +75,7 @@ class AgentChatService:
     def configure_checkpointer(self, checkpointer, session_lifecycle=None) -> None:
         self.checkpointer = checkpointer
         self.session_lifecycle = session_lifecycle or SessionLifecycleGuard("sqlite")
-        builder = StateGraph(AgentState)
+        builder = StateGraph(AgentState, context_schema=AgentRequestContext)
         builder.add_node("safety_gate", self._safety_gate)
         builder.add_node("agent", self._call_model)
         builder.add_node("tools", self._execute_tools)
@@ -153,30 +164,41 @@ class AgentChatService:
     def _route_after_safety(state: AgentState) -> str:
         return END if state.get("blocked") else "agent"
 
-    async def _call_model(self, state: AgentState) -> Dict[str, Any]:
-        call_context = dict(state.get("agent_context", {}))
+    async def _call_model(
+        self, state: AgentState, runtime: Runtime[AgentRequestContext]
+    ) -> Dict[str, Any]:
+        call_context = {
+            "userId": runtime.context.values.get("userId"),
+            "turnId": state.get("turn_id", ""),
+        }
         await asyncio.to_thread(rag_service.refresh_shared_index_state)
         call_context["knowledgeIndexVersion"] = rag_service.index_version
-        response = await llm_call_governor.invoke(
-            self.llm_with_tools,
-            state["messages"],
-            "chat-agent",
-            call_context,
-            hashlib.sha256(CHAT_SYSTEM_PROMPT.encode("utf-8")).hexdigest()[:12],
-        )
+        try:
+            response = await llm_call_governor.invoke(
+                self.llm_with_tools,
+                self._messages_for_model(state["messages"], runtime.context),
+                "chat-agent",
+                call_context,
+                hashlib.sha256(CHAT_SYSTEM_PROMPT.encode("utf-8")).hexdigest()[:12],
+            )
+        except Exception:
+            runtime.context.ephemeral_tool_outputs.clear()
+            raise
         tool_calls = getattr(response, "tool_calls", None) or []
         return {
             "messages": state["messages"] + [response],
             "tool_rounds": state.get("tool_rounds", 0) + (1 if tool_calls else 0),
         }
 
-    def _execute_tools(self, state: AgentState) -> Dict[str, Any]:
+    def _execute_tools(
+        self, state: AgentState, runtime: Runtime[AgentRequestContext]
+    ) -> Dict[str, Any]:
         response = state["messages"][-1]
         tool_map = {tool.name: tool for tool in ALL_TOOLS}
         messages = list(state["messages"])
         retrieved_sources = list(state.get("retrieved_sources", []))
         retrieval_hits: List[bool] = []
-        context_token = CURRENT_AGENT_CONTEXT.set(state["agent_context"])
+        context_token = CURRENT_AGENT_CONTEXT.set(runtime.context.values)
         sources_token = CURRENT_RETRIEVED_SOURCES.set(retrieved_sources)
         hits_token = CURRENT_RETRIEVAL_HITS.set(retrieval_hits)
         try:
@@ -191,7 +213,13 @@ class AgentChatService:
                     except Exception:
                         logger.exception("Agent tool execution failed: %s", name)
                         result = "该工具暂时不可用，请基于已知信息谨慎回答。"
-                messages.append(ToolMessage(content=result, tool_call_id=call.get("id", "unknown")))
+                call_id = str(call.get("id", "unknown"))
+                if name in self.PRIVATE_CONTEXT_TOOLS:
+                    runtime.context.ephemeral_tool_outputs[call_id] = result
+                    checkpoint_result = "已读取本轮获准使用的个人化信息。"
+                else:
+                    checkpoint_result = result
+                messages.append(ToolMessage(content=checkpoint_result, tool_call_id=call_id))
         finally:
             CURRENT_RETRIEVAL_HITS.reset(hits_token)
             CURRENT_RETRIEVED_SOURCES.reset(sources_token)
@@ -204,15 +232,41 @@ class AgentChatService:
             ),
         }
 
-    async def _force_final(self, state: AgentState) -> Dict[str, Any]:
-        forced_messages = state["messages"] + [HumanMessage(
-            content="请根据已有信息给出支持性回复，不要再调用工具；依据不足时请说明限制。"
-        )]
+    @staticmethod
+    def _messages_for_model(messages: List[Any], context: AgentRequestContext) -> List[Any]:
+        """Restore private tool output only in the in-memory provider request."""
+        if not context.ephemeral_tool_outputs:
+            return list(messages)
+        restored = []
+        for message in messages:
+            if isinstance(message, ToolMessage):
+                private_output = context.ephemeral_tool_outputs.get(str(message.tool_call_id))
+                if private_output is not None:
+                    message = ToolMessage(
+                        content=private_output,
+                        tool_call_id=message.tool_call_id,
+                    )
+            restored.append(message)
+        return restored
+
+    async def _force_final(
+        self, state: AgentState, runtime: Runtime[AgentRequestContext]
+    ) -> Dict[str, Any]:
+        forced_messages = self._messages_for_model(
+            state["messages"], runtime.context
+        ) + [
+            HumanMessage(
+                content="请根据已有信息给出支持性回复，不要再调用工具；依据不足时请说明限制。"
+            )
+        ]
         response = await llm_call_governor.invoke(
             self.base_llm,
             forced_messages,
             "chat-finalize",
-            state.get("agent_context"),
+            {
+                "userId": runtime.context.values.get("userId"),
+                "turnId": state.get("turn_id", ""),
+            },
             hashlib.sha256(CHAT_SYSTEM_PROMPT.encode("utf-8")).hexdigest()[:12],
         )
         return {"messages": state["messages"] + [response]}
@@ -257,14 +311,15 @@ class AgentChatService:
         session_id = str(context.get("sessionId", "agent-session"))
         turn_id = str(context.get("turnId", "agent-turn"))
         generation_token = context.get("generationToken")
-        run_config = build_checkpoint_run_config(session_id, generation_token, turn_id)
+        run_config = build_checkpoint_run_config(session_id)
+        runtime_context = AgentRequestContext(values=dict(context))
 
         # This lock covers both the checkpoint snapshot read and the complete
         # graph invocation. A purge therefore cannot finish before a running
         # graph's last checkpoint write.
         async with self.session_lifecycle.execution(session_id):
             final_text = await self._resolve_final_text(
-                messages, user_message, context, turn_id, run_config
+                messages, user_message, runtime_context, turn_id, run_config
             )
 
         for offset in range(0, len(final_text), 32):
@@ -274,31 +329,36 @@ class AgentChatService:
         self,
         messages: List[Dict],
         user_message: str,
-        context: Dict[str, Any],
+        context: AgentRequestContext,
         turn_id: str,
         run_config: Dict[str, Any],
     ) -> str:
 
         # The SQL stream store is authoritative for completed turns. This checkpoint
         # cache prevents an Agent retry from calling the provider twice for one turn.
-        snapshot = await self.graph.aget_state(run_config)
-        if (snapshot.values.get("turn_id") == turn_id
-                and snapshot.values.get("final_text")):
-            if snapshot.values.get("blocked"):
+        snapshot = await self.checkpointer.aget_tuple(run_config)
+        snapshot_values = (
+            snapshot.checkpoint.get("channel_values", {}) if snapshot is not None else {}
+        )
+        generation_token = str(context.values.get("generationToken") or turn_id)
+        if (snapshot_values.get("turn_id") == turn_id
+                and snapshot_values.get("generation_token") == generation_token
+                and snapshot_values.get("final_text")):
+            if snapshot_values.get("blocked"):
                 # Rebuild deterministic safety replies using current deployment
                 # resources rather than replaying possibly stale checkpoint text.
-                refreshed_safety_state = self._safety_gate(snapshot.values)
+                refreshed_safety_state = self._safety_gate(snapshot_values)
                 final_text = str(
                     refreshed_safety_state.get("final_text")
                     or safety_service.uncertain_response()
                 )
             else:
-                cached_text = str(snapshot.values["final_text"])
+                cached_text = str(snapshot_values["final_text"])
                 safe_cached_text, output_blocked = safety_service.review_response(cached_text)
                 if output_blocked:
                     final_text = safe_cached_text
-                elif ("retrieved_sources" not in snapshot.values
-                      or "knowledge_retrieved" not in snapshot.values):
+                elif ("retrieved_sources" not in snapshot_values
+                      or "knowledge_retrieved" not in snapshot_values):
                     # Older checkpoints do not carry source provenance. Do not replay
                     # an answer whose retrieval basis can no longer be checked.
                     final_text, rejected = review_source_citations(
@@ -309,8 +369,8 @@ class AgentChatService:
                 else:
                     final_text, rejected = review_source_citations(
                         safe_cached_text,
-                        snapshot.values.get("retrieved_sources", []),
-                        require_citation=snapshot.values.get("knowledge_retrieved", False),
+                        snapshot_values.get("retrieved_sources", []),
+                        require_citation=snapshot_values.get("knowledge_retrieved", False),
                     )
                     if rejected:
                         logger.warning("Unverified cached knowledge citations were replaced")
@@ -327,14 +387,17 @@ class AgentChatService:
                 "latest_user_message": user_message,
                 "pending_safety_clarification": pending_safety_clarification,
                 "turn_id": turn_id,
-                "agent_context": context,
+                "generation_token": generation_token,
                 "retrieved_sources": [],
                 "knowledge_retrieved": False,
                 "tool_rounds": 0,
                 "blocked": False,
                 "final_text": "",
             }
-            result = await self.graph.ainvoke(state, run_config)
+            try:
+                result = await self.graph.ainvoke(state, run_config, context=context)
+            finally:
+                context.ephemeral_tool_outputs.clear()
             final_text = str(result.get("final_text", ""))
         return final_text
 

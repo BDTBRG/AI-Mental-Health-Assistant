@@ -23,15 +23,17 @@ class FakeGraph:
     def __init__(self, service):
         self.service = service
 
-    async def aget_state(self, run_config):
-        return SimpleNamespace(values={})
-
-    async def ainvoke(self, state, run_config):
+    async def ainvoke(self, state, run_config, *, context):
         state.update(self.service._safety_gate(state))
         if self.service._route_after_safety(state) == "agent":
-            state.update(await self.service._call_model(state))
+            state.update(await self.service._call_model(state, SimpleNamespace(context=context)))
             state.update(self.service._review_output(state))
         return state
+
+
+class EmptyCheckpointer:
+    async def aget_tuple(self, _run_config):
+        return None
 
 
 @pytest.mark.asyncio
@@ -50,6 +52,7 @@ async def test_pending_safety_clarification_never_calls_real_model(
     service = AgentChatService.__new__(AgentChatService)
     service.llm_with_tools = object()
     service.graph = FakeGraph(service)
+    service.checkpointer = EmptyCheckpointer()
     service.session_lifecycle = SessionLifecycleGuard("sqlite")
     fake_governor = FakeGovernor()
     monkeypatch.setattr(agent_service_module, "llm_call_governor", fake_governor)
