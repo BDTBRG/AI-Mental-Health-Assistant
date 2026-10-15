@@ -12,6 +12,8 @@ Copy-Item deploy/.env.compose.example .env.compose -NoClobber
 
 编辑 `.env.compose`，替换本地演示密码和 JWT/Agent 内部密钥。密码会进入数据库连接 URL，建议使用 URL 安全字符。需要真实模型回复时，再填入你有权使用的 `DEEPSEEK_API_KEY`；留空时，界面和服务可启动，但模型生成不可用。
 
+`CRISIS_RESOURCE_TEXT` 默认留空。只有部署方已从当地官方渠道核验联系信息时，才填写可展示的纯文本资源；联系信息来源和复核日期应记录在部署方的配置管理中。未配置时，风险回复仍建议联系当地紧急服务或就近急诊，不会输出未经核验的电话号码。
+
 ```powershell
 Import-Module .\deploy\compose-verification.psm1 -Force
 $projectName = Get-ComposeProjectName -RepositoryRoot (Get-Location).Path

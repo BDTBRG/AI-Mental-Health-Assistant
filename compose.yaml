@@ -11,6 +11,7 @@ x-agent-environment: &agent-environment
   DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
   DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
   DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-deepseek-chat}
+  CRISIS_RESOURCE_TEXT: ${CRISIS_RESOURCE_TEXT:-}
   HF_HOME: /opt/huggingface
   TOKENIZERS_PARALLELISM: "false"
 

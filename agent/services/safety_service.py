@@ -1,6 +1,7 @@
 """Deterministic pre- and post-generation safety gates for mental-health chat."""
 
 import re
+import os
 from dataclasses import dataclass
 from typing import Literal
 
@@ -184,16 +185,16 @@ class SafetyService:
     @staticmethod
     def is_high_risk_followup_response(text: str) -> bool:
         actual = re.sub(r"\s+", "", text or "")
-        expected = re.sub(r"\s+", "", SafetyService.high_risk_followup_response())
-        return actual == expected
+        expected = re.sub(r"\s+", "", SafetyService._high_risk_followup_response_text())
+        return actual.startswith(expected)
 
     @staticmethod
     def pending_clarification_kind(text: str) -> str | None:
         if SafetyService.is_uncertain_response(text) or SafetyService.is_high_risk_followup_response(text):
             return "risk_intent"
         actual = re.sub(r"\s+", "", text or "")
-        expected = re.sub(r"\s+", "", SafetyService.high_risk_response())
-        if actual == expected:
+        expected = re.sub(r"\s+", "", SafetyService._high_risk_response_text())
+        if actual.startswith(expected):
             return "safe_location"
         return None
 
@@ -242,12 +243,16 @@ class SafetyService:
         return response, False
 
     @staticmethod
-    def high_risk_response() -> str:
+    def _high_risk_response_text() -> str:
         return (
             "听起来你现在承受着很大的痛苦，我很在意你此刻的安全。"
             "如果你已经准备伤害自己或身边有人正处于危险中，请立即联系当地紧急服务，"
             "并尽快请一位你信任的人陪在你身边。你现在是否处于安全的地方？"
         )
+
+    @staticmethod
+    def high_risk_response() -> str:
+        return SafetyService._include_crisis_resources(SafetyService._high_risk_response_text())
 
     @staticmethod
     def uncertain_response() -> str:
@@ -257,7 +262,7 @@ class SafetyService:
         )
 
     @staticmethod
-    def high_risk_followup_response() -> str:
+    def _high_risk_followup_response_text() -> str:
         return (
             "谢谢你告诉我。即使你现在处于安全地点，刚才提到的风险仍需要认真对待。"
             "请继续和可信任的人待在一起，并尽快联系当地紧急服务。"
@@ -265,11 +270,35 @@ class SafetyService:
         )
 
     @staticmethod
+    def high_risk_followup_response() -> str:
+        return SafetyService._include_crisis_resources(
+            SafetyService._high_risk_followup_response_text()
+        )
+
+    @staticmethod
     def safe_fallback() -> str:
-        return (
+        response = (
             "我不能帮助提供伤害自己或他人的方法，也不能替你做医疗诊断或用药决定。"
             "如果你现在有立即危险，请联系当地紧急服务，并找一位可信任的人陪着你。"
         )
+        return SafetyService._include_crisis_resources(response)
+
+    @staticmethod
+    def crisis_resource_guidance() -> str:
+        """Use only contact details explicitly configured for this deployment."""
+        configured_text = os.getenv("CRISIS_RESOURCE_TEXT", "").strip()
+        if configured_text:
+            return "部署方配置的本地求助资源：\n" + configured_text
+        return (
+            "当前部署未提供本地核验的专线联系方式。"
+            "若你正处于即时危险，请联系当地紧急服务或前往附近急诊。"
+        )
+
+    @staticmethod
+    def _include_crisis_resources(response: str) -> str:
+        if not os.getenv("CRISIS_RESOURCE_TEXT", "").strip():
+            return response
+        return response + "\n\n" + SafetyService.crisis_resource_guidance()
 
 
 safety_service = SafetyService()

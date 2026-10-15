@@ -12,6 +12,7 @@ from langchain_core.tools import tool
 from typing import Optional
 
 from services.rag_service import rag_service
+from services.safety_service import safety_service
 
 logger = logging.getLogger(__name__)
 CURRENT_AGENT_CONTEXT: ContextVar[Optional[dict]] = ContextVar("agent_context", default=None)
@@ -190,18 +191,10 @@ def suggest_exercise(emotion_type: str, intensity: Optional[int] = None) -> str:
 # ──────────────────────────────────────────────────────────────
 @tool
 def get_crisis_resources() -> str:
-    """获取危机干预和心理咨询的联系方式。
-    当用户表达出自伤、自杀或严重心理危机倾向时调用此工具。
+    """获取本部署配置的危机支持信息；未配置时说明暂无本地核验联系方式。
+    当用户表达出自伤、自杀或严重心理危机倾向且需要具体资源时调用此工具。
     无需参数"""
-    return (
-        "【全国心理援助资源】\n\n"
-        "- 全国心理援助热线：400-161-9995（24小时）\n"
-        "- 北京心理危机研究与干预中心：010-82951332\n"
-        "- 希望 24 热线：400-161-9995\n"
-        "- 青少年心理援助热线：12355\n\n"
-        "请立即联系以上任一号码，专业人员会为你提供帮助。"
-        "如果你处于紧急危险中，请直接拨打 110 或 120。"
-    )
+    return safety_service.crisis_resource_guidance()
 
 
 # ──────────────────────────────────────────────────────────────
