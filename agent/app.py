@@ -13,8 +13,9 @@ from typing import Any, Dict, List, Optional
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from redis import asyncio as redis_async
 import config
 from services.agent_service import agent_chat_service
 from services.checkpointer import open_checkpointer
@@ -31,6 +32,8 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load the configured RAG backend and shared graph checkpoint store."""
+    app.state.ready = False
+    app.state.checkpointer = None
     logger.info("正在加载 %s RAG 索引...", rag_service.backend)
     loaded = rag_service.load()
     if loaded:
@@ -46,15 +49,21 @@ async def lifespan(app: FastAPI):
     try:
         async with open_checkpointer() as checkpointer:
             agent_chat_service.configure_checkpointer(checkpointer)
+            app.state.checkpointer = checkpointer
+            app.state.ready = True
             try:
                 yield
             finally:
+                app.state.ready = False
+                app.state.checkpointer = None
                 agent_chat_service.clear_checkpointer()
     finally:
         rag_service.close()
 
 
 app = FastAPI(title="AI Mental Health Agent", version="1.0.0", lifespan=lifespan)
+app.state.ready = False
+app.state.checkpointer = None
 
 
 def require_internal_token(x_agent_token: str = Header(default="")) -> None:
@@ -102,6 +111,64 @@ class RAGRebuildRequest(BaseModel):
 @app.get("/api/agent/health")
 async def health():
     return {"status": "ok", "service": "AI Mental Health Agent"}
+
+
+@app.get("/api/agent/health/live")
+async def liveness():
+    return {"status": "ok", "service": "AI Mental Health Agent"}
+
+
+async def _dependencies_available() -> bool:
+    checkpointer = getattr(app.state, "checkpointer", None)
+    if checkpointer is None:
+        return False
+
+    try:
+        if config.RAG_BACKEND == "qdrant":
+            qdrant_store = getattr(rag_service, "qdrant_store", None)
+            if qdrant_store is None:
+                return False
+            await asyncio.wait_for(
+                asyncio.to_thread(qdrant_store.get_index_metadata), timeout=18
+            )
+            if not config.RAG_WRITE_LOCK_REDIS_URL.strip():
+                return False
+            redis_client = redis_async.Redis.from_url(
+                config.RAG_WRITE_LOCK_REDIS_URL,
+                socket_connect_timeout=2,
+                socket_timeout=2,
+            )
+            try:
+                await redis_client.ping()
+            finally:
+                await redis_client.aclose()
+
+        if config.AGENT_CHECKPOINT_BACKEND == "postgres":
+            connection = getattr(checkpointer, "conn", None)
+            lock = getattr(checkpointer, "lock", None)
+            if connection is None or lock is None:
+                return False
+            async with lock:
+                cursor = await asyncio.wait_for(
+                    connection.execute("SELECT 1"), timeout=3
+                )
+                await asyncio.wait_for(cursor.fetchone(), timeout=3)
+        return True
+    except Exception as error:
+        logger.warning(
+            "Agent readiness dependency check failed (%s)", type(error).__name__
+        )
+        return False
+
+
+@app.get("/api/agent/health/ready")
+async def readiness():
+    if not app.state.ready or not await _dependencies_available():
+        return JSONResponse(
+            status_code=503,
+            content={"status": "not_ready", "service": "AI Mental Health Agent"},
+        )
+    return {"status": "ready", "service": "AI Mental Health Agent"}
 
 
 @app.delete("/api/agent/sessions/{session_id}/checkpoint")

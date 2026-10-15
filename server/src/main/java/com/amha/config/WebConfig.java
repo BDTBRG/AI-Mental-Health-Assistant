@@ -12,6 +12,8 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 @RequiredArgsConstructor
 public class WebConfig implements WebMvcConfigurer {
 
+    private static final String[] HEALTH_PROBE_PATHS = {"/actuator/health/**"};
+
     private final JwtInterceptor jwtInterceptor;
     private final AdminAuthorizationInterceptor adminAuthorizationInterceptor;
 
@@ -33,9 +35,11 @@ public class WebConfig implements WebMvcConfigurer {
                         "/user/add",
                         "/file/uploads/**",
                         "/error"
-                );
+                )
+                .excludePathPatterns(HEALTH_PROBE_PATHS);
         registry.addInterceptor(adminAuthorizationInterceptor)
-                .addPathPatterns("/**");
+                .addPathPatterns("/**")
+                .excludePathPatterns(HEALTH_PROBE_PATHS);
     }
 
 }

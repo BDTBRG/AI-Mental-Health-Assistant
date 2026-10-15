@@ -1,9 +1,14 @@
 """Tests for the AI Mental Health Agent Service."""
 
 import json
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 from httpx import AsyncClient, ASGITransport
 
+import app as app_module
 import config
 from app import app
 from services.agent_service import agent_chat_service
@@ -54,6 +59,104 @@ class TestHealthCheck:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "ok"
+
+    async def test_liveness_remains_available_before_application_is_ready(self, client, monkeypatch):
+        monkeypatch.setattr(app.state, "ready", False, raising=False)
+
+        response = await client.get("/api/agent/health/live")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "ok"
+
+    async def test_readiness_returns_service_unavailable_before_startup_finishes(
+        self, client, monkeypatch
+    ):
+        monkeypatch.setattr(app.state, "ready", False, raising=False)
+        dependency_check = AsyncMock(return_value=True)
+        monkeypatch.setattr(
+            app_module, "_dependencies_available", dependency_check, raising=False
+        )
+
+        response = await client.get("/api/agent/health/ready")
+
+        assert response.status_code == 503
+        assert response.json()["status"] == "not_ready"
+        dependency_check.assert_not_awaited()
+
+    async def test_readiness_returns_ok_after_shared_dependencies_are_initialized(
+        self, client, monkeypatch
+    ):
+        monkeypatch.setattr(app.state, "ready", True, raising=False)
+        monkeypatch.setattr(
+            app_module, "_dependencies_available", AsyncMock(return_value=True), raising=False
+        )
+
+        response = await client.get("/api/agent/health/ready")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "ready"
+
+    async def test_readiness_fails_when_a_shared_dependency_is_unavailable(
+        self, client, monkeypatch
+    ):
+        monkeypatch.setattr(app.state, "ready", True, raising=False)
+        monkeypatch.setattr(
+            app_module, "_dependencies_available", AsyncMock(return_value=False), raising=False
+        )
+
+        response = await client.get("/api/agent/health/ready")
+
+        assert response.status_code == 503
+        assert response.json()["status"] == "not_ready"
+
+    async def test_dependency_probe_checks_qdrant_redis_and_postgres(self, monkeypatch):
+        executed_statements = []
+        redis_urls = []
+        redis_client = AsyncMock()
+
+        class FakeConnection:
+            async def execute(self, statement):
+                executed_statements.append(statement)
+                return SimpleNamespace(fetchone=AsyncMock(return_value={"?column?": 1}))
+
+        class FakeRedisFactory:
+            @staticmethod
+            def from_url(url, **_kwargs):
+                redis_urls.append(url)
+                return redis_client
+
+        monkeypatch.setattr(config, "RAG_BACKEND", "qdrant")
+        monkeypatch.setattr(config, "RAG_WRITE_LOCK_REDIS_URL", "redis://redis:6379/0")
+        monkeypatch.setattr(config, "AGENT_CHECKPOINT_BACKEND", "postgres")
+        metadata_reads = []
+        stats_reads = []
+
+        class FakeQdrantStore:
+            def get_index_metadata(self):
+                metadata_reads.append(True)
+                return {"collection_name": "knowledge", "index_version": "v1"}
+
+        def read_full_stats():
+            stats_reads.append(True)
+            return {"ready": False}
+
+        monkeypatch.setattr(app_module.rag_service, "qdrant_store", FakeQdrantStore())
+        monkeypatch.setattr(app_module.rag_service, "get_stats", read_full_stats)
+        monkeypatch.setattr(app_module.redis_async, "Redis", FakeRedisFactory)
+        monkeypatch.setattr(
+            app.state,
+            "checkpointer",
+            SimpleNamespace(conn=FakeConnection(), lock=asyncio.Lock()),
+            raising=False,
+        )
+
+        assert await app_module._dependencies_available()
+        assert metadata_reads == [True]
+        assert stats_reads == []
+        assert executed_statements == ["SELECT 1"]
+        assert redis_urls == ["redis://redis:6379/0"]
+        redis_client.ping.assert_awaited_once()
+        redis_client.aclose.assert_awaited_once()
 
 
 class TestChat:
