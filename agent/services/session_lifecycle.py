@@ -55,7 +55,7 @@ class SessionLifecycleGuard:
                 finally:
                     try:
                         await connection.execute(self._UNLOCK_SQL, (normalized_session_id,))
-                    except Exception:
+                    except BaseException:
                         # Do not return a possibly still-locked connection to
                         # the pool. Closing it releases PostgreSQL session locks.
                         await connection.close()
@@ -98,7 +98,7 @@ class SessionLifecycleGuard:
                 finally:
                     try:
                         await connection.execute(self._UNLOCK_SQL, (session_id,))
-                    except Exception:
+                    except BaseException:
                         await connection.close()
                         raise
             return

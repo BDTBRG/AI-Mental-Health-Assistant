@@ -21,6 +21,7 @@ class FakeConnection:
     def __init__(self, pool):
         self.pool = pool
         self.held_session = None
+        self.closed = False
 
     async def execute(self, statement, params=None):
         self.pool.statements.append((statement, params))
@@ -29,6 +30,8 @@ class FakeConnection:
             lock = self.pool.advisory_locks.setdefault(params[0], asyncio.Lock())
             await lock.acquire()
         elif "pg_advisory_unlock" in statement and self.held_session is not None:
+            if self.pool.cancel_on_unlock:
+                raise asyncio.CancelledError()
             self.pool.advisory_locks[self.held_session].release()
             self.held_session = None
         if "INSERT INTO agent_deleted_sessions" in statement:
@@ -38,14 +41,15 @@ class FakeConnection:
         return FakeCursor((None,))
 
     async def close(self):
+        self.closed = True
         if self.held_session is not None:
             self.pool.advisory_locks[self.held_session].release()
             self.held_session = None
 
 
 class FakeConnectionContext:
-    def __init__(self, pool):
-        self.connection = FakeConnection(pool)
+    def __init__(self, connection):
+        self.connection = connection
 
     async def __aenter__(self):
         return self.connection
@@ -55,13 +59,17 @@ class FakeConnectionContext:
 
 
 class FakePool:
-    def __init__(self):
+    def __init__(self, cancel_on_unlock=False):
         self.deleted = set()
         self.statements = []
         self.advisory_locks = {}
+        self.connections = []
+        self.cancel_on_unlock = cancel_on_unlock
 
     def connection(self):
-        return FakeConnectionContext(self)
+        connection = FakeConnection(self)
+        self.connections.append(connection)
+        return FakeConnectionContext(connection)
 
 
 class SessionLifecycleGuardTests(unittest.IsolatedAsyncioTestCase):
@@ -81,6 +89,29 @@ class SessionLifecycleGuardTests(unittest.IsolatedAsyncioTestCase):
                              if "pg_advisory_unlock" in statement)
         self.assertEqual(("session-17",), lock_params)
         self.assertEqual(lock_params, unlock_params)
+
+    async def test_cancelled_unlock_closes_connection_to_release_session_lock(self):
+        pool = FakePool(cancel_on_unlock=True)
+        guard = SessionLifecycleGuard("postgres", pool)
+
+        with self.assertRaises(asyncio.CancelledError):
+            async with guard.execution("session-20"):
+                pass
+
+        self.assertTrue(pool.connections[0].closed)
+        self.assertFalse(pool.advisory_locks["session-20"].locked())
+
+    async def test_cancelled_purge_unlock_closes_connection_to_release_session_lock(self):
+        pool = FakePool(cancel_on_unlock=True)
+        guard = SessionLifecycleGuard("postgres", pool)
+        purged = []
+
+        with self.assertRaises(asyncio.CancelledError):
+            await guard.purge("session-21", lambda: purged.append("done"))
+
+        self.assertEqual(["done"], purged)
+        self.assertTrue(pool.connections[0].closed)
+        self.assertFalse(pool.advisory_locks["session-21"].locked())
 
     async def test_deleted_session_is_tombstoned_before_waiting_for_active_run(self):
         pool = FakePool()

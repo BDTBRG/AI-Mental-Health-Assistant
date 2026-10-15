@@ -15,6 +15,8 @@ import java.util.UUID;
 @Service
 @RequiredArgsConstructor
 public class AgentCheckpointPurgeOutboxService {
+    private static final long PROCESSING_LEASE_MINUTES = 12;
+
     private final AgentCheckpointPurgeOutboxMapper outboxMapper;
     private final ConsultationSessionMapper sessionMapper;
 
@@ -65,7 +67,9 @@ public class AgentCheckpointPurgeOutboxService {
         task.setProcessingVersion(task.getDesiredVersion());
         task.setAttempts((task.getAttempts() == null ? 0 : task.getAttempts()) + 1);
         task.setLeaseToken(UUID.randomUUID().toString());
-        task.setLeaseUntil(LocalDateTime.now().plusMinutes(2));
+        // The Agent purge request may wait up to 10 minutes for an active graph
+        // run; keep the lease longer so other replicas do not duplicate it.
+        task.setLeaseUntil(LocalDateTime.now().plusMinutes(PROCESSING_LEASE_MINUTES));
         task.setUpdatedAt(LocalDateTime.now());
         outboxMapper.updateById(task);
         return task;
