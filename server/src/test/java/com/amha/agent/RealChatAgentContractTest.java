@@ -9,6 +9,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -56,6 +57,35 @@ class RealChatAgentContractTest {
             assertEquals("/api/agent/v2/chat", requestPath.get());
             assertTrue(requestBody.get().contains("\"generationToken\":\"generation-7\""));
             assertEquals("unit-token", agentToken.get());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void purgeRoutesDistinguishTemporaryRevocationFromPermanentDeletion() throws Exception {
+        List<String> requestPaths = new CopyOnWriteArrayList<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            requestPaths.add(exchange.getRequestURI().getPath());
+            byte[] response = "{\"code\":\"200\"}".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            try (var output = exchange.getResponseBody()) {
+                output.write(response);
+            }
+        });
+        server.start();
+
+        try {
+            RealChatAgent chatAgent = new RealChatAgent(
+                    "http://127.0.0.1:" + server.getAddress().getPort(), "unit-token");
+
+            chatAgent.purgeSessionState(17L, false);
+            chatAgent.purgeSessionState(18L, true);
+
+            assertEquals(List.of(
+                    "/api/agent/v2/sessions/17/checkpoint/purge",
+                    "/api/agent/v2/sessions/18"), requestPaths);
         } finally {
             server.stop(0);
         }

@@ -230,14 +230,28 @@ public class RealChatAgent implements ChatAgent {
 
     @Override
     public void purgeSessionState(Long sessionId) {
+        purgeSessionState(sessionId, false);
+    }
+
+    @Override
+    public void purgeSessionState(Long sessionId, boolean permanentlyDeleted) {
         if (internalToken == null || internalToken.isBlank()) {
             throw new IllegalStateException("Agent internal token is not configured");
         }
-        webClient.delete()
-                .uri("/api/agent/sessions/{sessionId}/checkpoint", sessionId)
-                .header("X-Agent-Token", internalToken)
-                .retrieve()
-                .bodyToMono(String.class)
-                .block(Duration.ofSeconds(5));
+        if (permanentlyDeleted) {
+            webClient.delete()
+                    .uri("/api/agent/v2/sessions/{sessionId}", sessionId)
+                    .header("X-Agent-Token", internalToken)
+                    .retrieve()
+                    .bodyToMono(String.class)
+                    .block(Duration.ofMinutes(10));
+        } else {
+            webClient.post()
+                    .uri("/api/agent/v2/sessions/{sessionId}/checkpoint/purge", sessionId)
+                    .header("X-Agent-Token", internalToken)
+                    .retrieve()
+                    .bodyToMono(String.class)
+                    .block(Duration.ofMinutes(10));
+        }
     }
 }

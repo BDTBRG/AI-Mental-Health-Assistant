@@ -20,6 +20,7 @@ import config
 from services.agent_service import agent_chat_service
 from services.checkpoint_config import require_generation_token
 from services.checkpointer import open_checkpointer
+from services.session_lifecycle import open_session_lifecycle_guard
 from services.emotion_service import emotion_service
 from services.diary_service import diary_service
 from services.rag_service import rag_service
@@ -35,6 +36,7 @@ async def lifespan(app: FastAPI):
     """Load the configured RAG backend and shared graph checkpoint store."""
     app.state.ready = False
     app.state.checkpointer = None
+    app.state.session_lifecycle = None
     logger.info("正在加载 %s RAG 索引...", rag_service.backend)
     loaded = rag_service.load()
     if loaded:
@@ -49,15 +51,22 @@ async def lifespan(app: FastAPI):
         os.makedirs(os.path.dirname(config.AGENT_CHECKPOINT_DB) or ".", exist_ok=True)
     try:
         async with open_checkpointer() as checkpointer:
-            agent_chat_service.configure_checkpointer(checkpointer)
-            app.state.checkpointer = checkpointer
-            app.state.ready = True
-            try:
-                yield
-            finally:
-                app.state.ready = False
-                app.state.checkpointer = None
-                agent_chat_service.clear_checkpointer()
+            async with open_session_lifecycle_guard(
+                config.AGENT_CHECKPOINT_BACKEND,
+                config.AGENT_CHECKPOINT_POSTGRES_DSN,
+                config.AGENT_CHECKPOINT_LOCK_POOL_SIZE,
+            ) as session_lifecycle:
+                agent_chat_service.configure_checkpointer(checkpointer, session_lifecycle)
+                app.state.checkpointer = checkpointer
+                app.state.session_lifecycle = session_lifecycle
+                app.state.ready = True
+                try:
+                    yield
+                finally:
+                    app.state.ready = False
+                    app.state.checkpointer = None
+                    app.state.session_lifecycle = None
+                    agent_chat_service.clear_checkpointer()
     finally:
         rag_service.close()
 
@@ -154,6 +163,11 @@ async def _dependencies_available() -> bool:
                     connection.execute("SELECT 1"), timeout=3
                 )
                 await asyncio.wait_for(cursor.fetchone(), timeout=3)
+            session_lifecycle = getattr(app.state, "session_lifecycle", None)
+            if session_lifecycle is None or not await asyncio.wait_for(
+                session_lifecycle.check_ready(), timeout=3
+            ):
+                return False
         return True
     except Exception as error:
         logger.warning(
@@ -177,6 +191,22 @@ async def delete_session_checkpoint(session_id: str, x_agent_token: str = Header
     require_internal_token(x_agent_token)
     await agent_chat_service.purge_session(session_id)
     return {"code": "200", "data": {"deleted": True}}
+
+
+@app.post("/api/agent/v2/sessions/{session_id}/checkpoint/purge")
+async def purge_session_checkpoint_v2(
+    session_id: str, _authorized: None = Depends(require_internal_token)
+):
+    await agent_chat_service.purge_session(session_id, permanently_deleted=False)
+    return {"code": "200", "data": {"deleted": True, "permanent": False}}
+
+
+@app.delete("/api/agent/v2/sessions/{session_id}")
+async def delete_session_v2(
+    session_id: str, _authorized: None = Depends(require_internal_token)
+):
+    await agent_chat_service.purge_session(session_id, permanently_deleted=True)
+    return {"code": "200", "data": {"deleted": True, "permanent": True}}
 
 
 def _build_chat_stream_response(request: ChatRequest) -> StreamingResponse:

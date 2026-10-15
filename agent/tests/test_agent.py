@@ -149,6 +149,12 @@ class TestHealthCheck:
             SimpleNamespace(conn=FakeConnection(), lock=asyncio.Lock()),
             raising=False,
         )
+        monkeypatch.setattr(
+            app.state,
+            "session_lifecycle",
+            SimpleNamespace(check_ready=AsyncMock(return_value=True)),
+            raising=False,
+        )
 
         assert await app_module._dependencies_available()
         assert metadata_reads == [True]
@@ -173,6 +179,35 @@ class TestChat:
         last = json.loads(lines[-1])
         assert last["data"]["done"] is True
         assert last["data"]["fullResponse"] == "mocked response"
+
+    async def test_legacy_checkpoint_delete_remains_a_temporary_purge(self, client, monkeypatch):
+        purge = AsyncMock()
+        monkeypatch.setattr(agent_chat_service, "purge_session", purge)
+
+        response = await client.delete("/api/agent/sessions/legacy-18/checkpoint")
+
+        assert response.status_code == 200
+        purge.assert_awaited_once_with("legacy-18")
+
+    async def test_versioned_checkpoint_purge_and_session_delete_are_distinct(
+        self, client, monkeypatch
+    ):
+        purge = AsyncMock()
+        monkeypatch.setattr(agent_chat_service, "purge_session", purge)
+
+        temporary = await client.post(
+            "/api/agent/v2/sessions/session-21/checkpoint/purge"
+        )
+        permanent = await client.delete("/api/agent/v2/sessions/session-22")
+
+        assert temporary.status_code == 200
+        assert temporary.json()["data"]["permanent"] is False
+        assert permanent.status_code == 200
+        assert permanent.json()["data"]["permanent"] is True
+        assert purge.await_args_list[0].args == ("session-21",)
+        assert purge.await_args_list[0].kwargs == {"permanently_deleted": False}
+        assert purge.await_args_list[1].args == ("session-22",)
+        assert purge.await_args_list[1].kwargs == {"permanently_deleted": True}
 
     async def test_generation_aware_route_is_available_for_fenced_clients(self, client):
         body = {

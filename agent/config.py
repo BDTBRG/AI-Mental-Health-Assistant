@@ -23,6 +23,9 @@ AGENT_CHECKPOINT_DB = os.getenv(
     os.path.join(os.path.dirname(__file__), "data", "agent_checkpoints.sqlite"),
 )
 AGENT_CHECKPOINT_POSTGRES_DSN = os.getenv("AGENT_CHECKPOINT_POSTGRES_DSN", "")
+AGENT_CHECKPOINT_LOCK_POOL_SIZE = max(
+    1, int(os.getenv("AGENT_CHECKPOINT_LOCK_POOL_SIZE", "16"))
+)
 AGENT_INTERNAL_TOKEN = os.getenv("AGENT_INTERNAL_TOKEN", "")
 RAG_BACKEND = os.getenv("RAG_BACKEND", "faiss").strip().lower()
 if RAG_BACKEND not in {"faiss", "qdrant"}:

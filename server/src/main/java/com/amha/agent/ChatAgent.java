@@ -34,4 +34,8 @@ public interface ChatAgent {
     default void purgeSessionState(Long sessionId) {
         // Mock agents have no durable session state to clear.
     }
+
+    default void purgeSessionState(Long sessionId, boolean permanentlyDeleted) {
+        purgeSessionState(sessionId);
+    }
 }

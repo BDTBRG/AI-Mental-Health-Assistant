@@ -14,6 +14,7 @@ from prompts.chat_prompt import CHAT_SYSTEM_PROMPT
 from services.safety_service import safety_service
 from services.llm_governance import llm_call_governor
 from services.checkpoint_config import build_checkpoint_run_config
+from services.session_lifecycle import SessionLifecycleGuard
 from services.rag_service import rag_service
 from tools.mental_health_tools import (
     ALL_TOOLS,
@@ -58,9 +59,11 @@ class AgentChatService:
         self.llm_with_tools = self.base_llm.bind_tools(ALL_TOOLS)
         self.graph = None
         self.checkpointer = None
+        self.session_lifecycle = SessionLifecycleGuard("sqlite")
 
-    def configure_checkpointer(self, checkpointer) -> None:
+    def configure_checkpointer(self, checkpointer, session_lifecycle=None) -> None:
         self.checkpointer = checkpointer
+        self.session_lifecycle = session_lifecycle or SessionLifecycleGuard("sqlite")
         builder = StateGraph(AgentState)
         builder.add_node("safety_gate", self._safety_gate)
         builder.add_node("agent", self._call_model)
@@ -90,10 +93,17 @@ class AgentChatService:
     def clear_checkpointer(self) -> None:
         self.graph = None
         self.checkpointer = None
+        self.session_lifecycle = SessionLifecycleGuard("sqlite")
 
-    async def purge_session(self, session_id: str) -> None:
-        if self.checkpointer is not None:
-            await self.checkpointer.adelete_thread(str(session_id))
+    async def purge_session(self, session_id: str, permanently_deleted: bool = False) -> None:
+        if self.checkpointer is None:
+            raise RuntimeError("LangGraph checkpointer has not been initialized")
+        normalized_session_id = str(session_id)
+        await self.session_lifecycle.purge(
+            normalized_session_id,
+            lambda: self.checkpointer.adelete_thread(normalized_session_id),
+            permanently_deleted=permanently_deleted,
+        )
 
     def _build_messages(self, history: List[Dict]) -> List[Any]:
         messages: List[Any] = [SystemMessage(content=CHAT_SYSTEM_PROMPT)]
@@ -249,6 +259,26 @@ class AgentChatService:
         generation_token = context.get("generationToken")
         run_config = build_checkpoint_run_config(session_id, generation_token, turn_id)
 
+        # This lock covers both the checkpoint snapshot read and the complete
+        # graph invocation. A purge therefore cannot finish before a running
+        # graph's last checkpoint write.
+        async with self.session_lifecycle.execution(session_id):
+            final_text = await self._resolve_final_text(
+                messages, user_message, context, turn_id, run_config
+            )
+
+        for offset in range(0, len(final_text), 32):
+            yield final_text[offset:offset + 32]
+
+    async def _resolve_final_text(
+        self,
+        messages: List[Dict],
+        user_message: str,
+        context: Dict[str, Any],
+        turn_id: str,
+        run_config: Dict[str, Any],
+    ) -> str:
+
         # The SQL stream store is authoritative for completed turns. This checkpoint
         # cache prevents an Agent retry from calling the provider twice for one turn.
         snapshot = await self.graph.aget_state(run_config)
@@ -306,9 +336,7 @@ class AgentChatService:
             }
             result = await self.graph.ainvoke(state, run_config)
             final_text = str(result.get("final_text", ""))
-
-        for offset in range(0, len(final_text), 32):
-            yield final_text[offset:offset + 32]
+        return final_text
 
 
 agent_chat_service = AgentChatService()

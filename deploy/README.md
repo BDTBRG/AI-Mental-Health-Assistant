@@ -33,12 +33,13 @@ docker compose -p $projectName --env-file .env.compose stop
 # 再次启动时运行：docker compose -p $projectName --env-file .env.compose up -d
 ```
 
-数据库、向量索引、检查点、对象和模型缓存使用命名卷持久化。不要使用 `down -v`；该选项会删除这些本地演示数据。
+数据库、向量索引、检查点、对象和模型缓存使用命名卷持久化。不要使用 `down -v`；该选项会删除这些本地演示数据。单机 SQLite 开发模式的会话锁与删除墓碑只在当前 Agent 进程内有效，仅用于单实例本地运行；Compose 多副本必须使用共享 PostgreSQL 检查点模式。
 
 ## 架构与验收
 
 - 浏览器访问 `gateway:8080`；`/api/` 去掉前缀后转发到两个 Spring 实例，`/file/uploads/` 保留文件读取路径。SSE 响应关闭代理缓冲，读取/发送超时为 310 秒。
-- Spring 通过内部网关访问两个 Agent 副本。Agent 共享 PostgreSQL LangGraph 检查点、Qdrant 知识索引和 Redis 写锁；两个 Agent 串行完成首次 PostgreSQL 检查点表初始化。
+- Spring 通过内部网关访问两个 Agent 副本。Agent 共享 PostgreSQL LangGraph 检查点、会话执行 advisory lock 与删除墓碑、Qdrant 知识索引和 Redis 写锁；两个 Agent 串行完成首次 PostgreSQL 检查点表初始化。删除墓碑表由 Agent 启动时幂等创建；`AGENT_CHECKPOINT_LOCK_POOL_SIZE` 是每个 Agent 副本的锁连接池上限，默认 16，另有一个独立连接用于先提交删除墓碑。内网 Agent 请求超时为 610 秒，给长 graph 清理和会话删除留出等待空间；公网 SSE 超时仍为 310 秒。
+- Java 与 Agent 的 v2 对话/清理接口需要配套升级。新 Java 调用旧 Agent 会收到 404 并失败关闭，清理 Outbox 会重试；旧 Java 的兼容 checkpoint DELETE 无法表达“记忆撤回”与“会话永久删除”的区别，只执行临时清理。因此在两端都升级并排空旧 Java 请求前，不应把永久删除栅栏视为已生效。
 - Agent 另接入仅供出站访问模型和 Hugging Face 的网络；依赖服务与网关位于私有网络。内网端口没有 `ports` 映射。
 - Java 和 Agent 的存活/就绪检查分别使用 Actuator 与 FastAPI 探针。Actuator 只暴露 health，隐藏组件详情；Spring 就绪状态要求数据库和 Redis 健康。Agent 就绪状态只有在 RAG 后端和 LangGraph 检查点存储初始化后才为就绪。Qdrant 启动门使用 Agent 镜像中的 Python 标准库每两秒轮询 `/readyz`，最多等待 120 秒，避免依赖 Qdrant 镜像未提供的探测工具。
 - 网关结构化访问日志记录格式校验后的探测关联 ID、HTTP 方法、状态、上游地址、上游状态和耗时，不记录请求路径、查询参数或请求体；查看可运行 `docker compose -p $projectName --env-file .env.compose logs gateway`，访问日志中的 `upstream=` 会显示后端地址。验收脚本只统计带本轮关联 ID 且对应上游返回 2xx 的请求，避免同期其他网关流量影响副本覆盖判断。

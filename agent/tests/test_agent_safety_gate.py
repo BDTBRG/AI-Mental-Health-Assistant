@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage
 import services.agent_service as agent_service_module
 from services.agent_service import AgentChatService
 from services.safety_service import SafetyService
+from services.session_lifecycle import SessionLifecycleGuard
 from tools.mental_health_tools import CURRENT_AGENT_CONTEXT
 
 
@@ -49,6 +50,7 @@ async def test_pending_safety_clarification_never_calls_real_model(
     service = AgentChatService.__new__(AgentChatService)
     service.llm_with_tools = object()
     service.graph = FakeGraph(service)
+    service.session_lifecycle = SessionLifecycleGuard("sqlite")
     fake_governor = FakeGovernor()
     monkeypatch.setattr(agent_service_module, "llm_call_governor", fake_governor)
 
