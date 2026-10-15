@@ -192,7 +192,7 @@ class UserControllerTest {
         String selfAdminToken = objectMapper.readTree(selfAdminLoginResponse)
                 .path("data").path("token").asText();
         mockMvc.perform(get("/data-analytics/overview").header("token", selfAdminToken))
-                .andExpect(status().isOk())
+                .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.code").value("403"));
     }
 }

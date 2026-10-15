@@ -330,19 +330,10 @@ public class ContextSummaryOutboxService {
         ConsultationSession session = sessionMapper.selectByIdForUpdate(sessionId);
         if (session == null) return false;
         ConsultationContextSummaryOutbox task = outboxMapper.selectBySessionForUpdate(sessionId);
-        if (task == null || !"DEAD".equals(task.getStatus())) return false;
-        LocalDateTime now = LocalDateTime.now();
-        task.setStatus("PENDING");
-        task.setAttemptCount(0);
-        task.setNextAttemptAt(now);
-        task.setLastErrorCode(null);
-        task.setManualRetryCount(value(task.getManualRetryCount()) + 1);
-        task.setLastManualRetryBy(actorUserId);
-        task.setLastManualRetryAt(now);
-        task.setUpdatedAt(now);
-        clearLease(task);
-        outboxMapper.updateById(task);
-        return true;
+        if (task == null || !Objects.equals(session.getUserId(), task.getUserId())
+                || !"DEAD".equals(task.getStatus())) return false;
+        LocalDateTime retriedAt = LocalDateTime.now();
+        return outboxMapper.retryDeadForOwner(sessionId, session.getUserId(), actorUserId, retriedAt) == 1;
     }
 
     @Transactional

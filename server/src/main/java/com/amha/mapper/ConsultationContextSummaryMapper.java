@@ -13,6 +13,11 @@ import java.time.LocalDateTime;
 public interface ConsultationContextSummaryMapper extends BaseMapper<ConsultationContextSummary> {
 
     @Select("SELECT * FROM consultation_context_summary WHERE session_id = #{sessionId} "
+            + "AND user_id = #{userId} LIMIT 1")
+    ConsultationContextSummary selectBySessionAndUser(@Param("sessionId") Long sessionId,
+                                                       @Param("userId") Long userId);
+
+    @Select("SELECT * FROM consultation_context_summary WHERE session_id = #{sessionId} "
             + "AND user_id = #{userId} LIMIT 1 FOR UPDATE")
     ConsultationContextSummary selectBySessionAndUserForUpdate(@Param("sessionId") Long sessionId,
                                                                  @Param("userId") Long userId);

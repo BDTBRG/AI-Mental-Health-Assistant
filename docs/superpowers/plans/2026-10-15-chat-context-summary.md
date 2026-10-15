@@ -295,20 +295,26 @@ try {
 
 **目标文件：** `ChatContextAssembler.java`、`ChatContextSnapshot.java`、`ChatTurnStore.java`、`ChatServiceImpl.java`、相关 Mapper/exception/controller 和集成测试。
 
-- [ ] **Step 1: 写上下文组装单测。** 新建 `ChatContextAssemblerTest`，覆盖 summary watermark 后按 ID 升序返回、不读取其他 session 的记录、最近 12 条之外可入 summary target、39 条 raw history + 当前输入边界、总字符 32,000、单条 8,000、最近 12 条自身超限分别得 pending/too-large。测试使用 `ConsultationContextSummaryMapper` 和 `ConsultationMessageMapper` mocks。
-- [ ] **Step 2: 确认测试失败。** `mvn -f server/pom.xml -Dtest=ChatContextAssemblerTest test`；预期缺少 assembler。
-- [ ] **Step 3: 实现有界 Mapper 和只读 assembler。** 通过 LIMIT 查询，不再将会话全部消息载入 JVM；查询必须绑定 `sessionId + userId`，校验摘要归属和水位，只负责计算返回 `ChatContextPreparation`，不得写 Outbox、turn 或消息。该结果固定含 `status ∈ {READY, SUMMARY_PENDING, SUMMARY_UNAVAILABLE, WINDOW_TOO_LARGE}`、有界原文 `history`、独立 `contextSummary`、`summaryTargetThroughMessageId` 和 `retryAfterMs`；`READY` 时转为 `ChatContextSnapshot(history, contextSummary, throughMessageId)`。`summaryTargetThroughMessageId` 是最近 12 条已持久化消息之前的最大 ID；如果这之前没有消息，不创建空摘要任务。字符数按 Unicode code point 统计；Agent 原始 JSON body 则按 UTF-8 byte 限制。
-- [ ] **Step 4: 写 turn 状态单测。** 新增/扩展 `ChatTurnStore` 测试：首次超限通过 `waitForContext(sessionId,userId,requestId,hash,message,targetThroughId)` 一次性创建 `WAITING_CONTEXT` turn、用户消息、会话 message count 和 Outbox 任务；最近窗口硬超限通过 `rejectContextTurn(sessionId,userId,requestId,hash,message)` 原子保存 `CONTEXT_REJECTED` turn 和用户消息；相同 request ID/hash 重试不重复写入；不同 hash 冲突；上下文准备好后同一 turn 转 RUNNING；未整理的 turn 阻止新 ID 越序；`completeTurn` 在同一事务写 AI 消息、完成 turn 并合并下一摘要水位。
-- [ ] **Step 5: 实现 ChatTurnStore 状态机。** `ConsultationChatTurnMapper.selectActiveBySessionForUpdate` 把 `WAITING_CONTEXT` 视为活跃排队 turn；复用现有 `beginTurn(Long sessionId, Long userId, String requestId, String requestHash, String userMessage)`，但只允许它在 READY 预检后创建 RUNNING、新增用户消息，或把相同 hash 的 `WAITING_CONTEXT` 原子转为 RUNNING；增加 `waitForContext(Long sessionId, Long userId, String requestId, String requestHash, String userMessage, Long targetThroughMessageId)` 和 `rejectContextTurn(Long sessionId, Long userId, String requestId, String requestHash, String userMessage)`；`CONTEXT_REJECTED` 终态不再重试，`WAITING_CONTEXT` 保留相同 hash/request ID；兼容现有 `PENDING` 首轮 turn 和 generation epoch/token 栅栏。
-- [ ] **Step 6: 集成 streamChat 与新错误 envelope。** `ChatServiceImpl` 先验证 session owner，再检查相同 request ID 的现存 turn；RUNNING/COMPLETED 直接 attach/replay，不被摘要预检阻断。新请求或 `WAITING_CONTEXT` 请求按以下分支处理；`ChatTurnStore` 的每个写操作是独立 `@Transactional` 公开方法，返回提交后 `ChatServiceImpl` 才抛非 SSE 异常，避免回滚已保存的用户消息和 Outbox：
+- [x] **Step 1: 写上下文组装单测。** 新建 `ChatContextAssemblerTest`，覆盖 summary watermark 后按 ID 升序返回、不读取其他 session 的记录、最近 12 条之外可入 summary target、39 条 raw history + 当前输入边界、总字符 32,000、单条 8,000、最近 12 条自身超限分别得 pending/too-large。测试使用 `ConsultationContextSummaryMapper` 和 `ConsultationMessageMapper` mocks。
+- [x] **Step 2: 确认测试失败。** `mvn -f server/pom.xml -Dtest=ChatContextAssemblerTest test`；预期缺少 assembler。
+- [x] **Step 3: 实现有界 Mapper 和只读 assembler。** 通过 LIMIT 查询，不再将会话全部消息载入 JVM；查询必须绑定 `sessionId + userId`，校验摘要归属和水位，只负责计算返回 `ChatContextPreparation`，不得写 Outbox、turn 或消息。该结果固定含 `status ∈ {READY, SUMMARY_PENDING, SUMMARY_UNAVAILABLE, WINDOW_TOO_LARGE}`、有界原文 `history`、独立 `contextSummary`、`summaryTargetThroughMessageId` 和 `retryAfterMs`；`READY` 时转为 `ChatContextSnapshot(history, contextSummary, throughMessageId)`。`summaryTargetThroughMessageId` 是最近 12 条已持久化消息之前的最大 ID；如果这之前没有消息，不创建空摘要任务。字符数按 Unicode code point 统计；Agent 原始 JSON body 则按 UTF-8 byte 限制。
+- [x] **Step 4: 写 turn 状态单测。** 新增/扩展 `ChatTurnStore` 测试：首次超限通过 `waitForContext(sessionId,userId,requestId,hash,message,targetThroughId)` 一次性创建 `WAITING_CONTEXT` turn、用户消息、会话 message count 和 Outbox 任务；最近窗口硬超限通过 `rejectContextTurn(sessionId,userId,requestId,hash,message)` 原子保存 `CONTEXT_REJECTED` turn 和用户消息；相同 request ID/hash 重试不重复写入；不同 hash 冲突；上下文准备好后同一 turn 转 RUNNING；未整理的 turn 阻止新 ID 越序；`completeTurn` 在同一事务写 AI 消息、完成 turn 并合并下一摘要水位。
+- [x] **Step 5: 实现 ChatTurnStore 状态机。** `ConsultationChatTurnMapper.selectActiveBySessionForUpdate` 把 `WAITING_CONTEXT` 视为活跃排队 turn；复用现有 `beginTurn(Long sessionId, Long userId, String requestId, String requestHash, String userMessage)`，只允许它在 READY 预检后创建 RUNNING、新增用户消息，或把相同 hash 的 `WAITING_CONTEXT`/`CONTEXT_UNAVAILABLE` 原子转为 RUNNING；增加 `waitForContext(...)` 和 `rejectContextTurn(...)`；新 ID 在成功、待整理、摘要不可用、窗口超限等路径持久化较新用户消息时，必须在同事务内将其他 `CONTEXT_UNAVAILABLE` turn 改为终态 `CONTEXT_SUPERSEDED`，同 ID 恢复除外；所有入口锁内发现已 superseded 时返回不可重试 envelope；兼容 `PENDING` 首轮 turn 和 generation epoch/token 栅栏。
+- [x] **Step 6: 集成 streamChat 与新错误 envelope。** `ChatServiceImpl` 先验证 session owner，再检查相同 request ID 的现存 turn；RUNNING/COMPLETED 直接 attach/replay，不被摘要预检阻断。新请求或等待请求按以下准备结果分支处理；`ChatTurnStore` 的每个写操作是独立 `@Transactional` 公开方法，返回提交后 `ChatServiceImpl` 才抛非 SSE 异常，避免回滚已保存的用户消息和 Outbox：
 
 ```java
 switch (preparation.status()) {
     case READY -> turnStart = turnStore.beginTurn(
             sessionId, userId, requestId, requestHash, userMessage);
-    case SUMMARY_PENDING, SUMMARY_UNAVAILABLE -> {
+    case SUMMARY_PENDING -> {
         turnStore.waitForContext(sessionId, userId, requestId, requestHash,
                 userMessage, preparation.summaryTargetThroughMessageId());
+        throw preparation.toException(requestId);
+    }
+    case SUMMARY_UNAVAILABLE -> {
+        boolean superseded = turnStore.markContextUnavailable(
+                sessionId, userId, requestId, requestHash, userMessage, true);
+        if (superseded) throw contextSuperseded(requestId);
         throw preparation.toException(requestId);
     }
     case WINDOW_TOO_LARGE -> {
@@ -320,10 +326,14 @@ switch (preparation.status()) {
 
 `GlobalExceptionHandler` 仅为 `ChatContextPreparationException` 返回携带 hint 的现有 `Result` envelope：`new Result<>(errorCode, message, new ChatRetryHint(clientRequestId, retryable, retryAfterMs))`，状态保持 HTTP 200，日志只记错误码。`ChatRetryHint` 同时包含 `clientRequestId`，因此服务端为无 ID 的兼容请求生成的 ID 可在错误响应中找回。
 
-`SUMMARY_PENDING` 返回 `CONTEXT_SUMMARY_PENDING`；服务/模型不可用或摘要功能关闭时用 `CONTEXT_SUMMARY_UNAVAILABLE`，保持原文和同一 request ID 可恢复、不提交长上下文给 Agent；最近窗口超限为终态 `CONTEXT_WINDOW_TOO_LARGE`，且原子保存该轮和用户消息以防重复请求。READY 后向 `ChatAgent.streamResponse` 传 raw history 与单独的 `userMessage`；如果正在恢复 WAITING_CONTEXT，该轮已存储的用户消息必须从 raw history 中按其最新 ID 排除，不能重复注入。`completeTurn` 才触发异步整理；`deleteSession` 删除 summary/outbox 并阻止晚到 Worker 复活数据。
-- [ ] **Step 7: 写集成回归。** 在 `ChatControllerTest` 加 MockMvc 测试：当前 `/stream` Controller 声明 `produces=text/event-stream`，所以必须实际断言预检异常仍被 `GlobalExceptionHandler` 编码为 `application/json` HTTP 200 `Result`，不可只验证 service 异常对象。pending 的 `code=CONTEXT_SUMMARY_PENDING` 且 `data.retryable=true`、`retryAfterMs>0`；服务不可用为 `CONTEXT_SUMMARY_UNAVAILABLE` 且 `data.retryable=true` 并保留相同 ID；最近窗口超限为 `CONTEXT_WINDOW_TOO_LARGE` 且 `data.retryable=false`；`data.clientRequestId` 等于请求 ID；不带 ID的兼容请求首次 pending 后，服务端生成的 ID 出现在响应并被后续同 ID 重试沿用；恢复后 user message 只一条且没有重复加入 Agent history；别人无法触发；删除后摘要/outbox 同事务不存在；Agent mock 收到 summary 但用户 API history 不泄露给其他用户。再验证 `POST /api/admin/context-summary/{sessionId}/retry` 只有 `userType=2` 管理员可将 DEAD 任务重放，普通用户被拒且响应不含摘要正文；重放操作者/时间写入数据库审计字段。仅在 MockMvc 证明必需时修改 `ChatController` 的媒体类型声明，不能把错误响应改成 SSE event。
-- [ ] **Step 8: 运行后端验证。** `mvn -f server/pom.xml -Dtest=ChatContextAssemblerTest,ChatControllerTest,RealChatAgentContractTest test`；之后运行 `mvn -f server/pom.xml test`。失败时先定位是本批回归还是已有环境/测试依赖问题，记录真实结果，不跳过失败用例。
-- [ ] **Step 9: 提交本阶段。** 提交 `feat(server): resume chat turns after context compaction` 并快进合入本地 `master`。
+已 superseded 的旧 ID 直接返回 `CONTEXT_REQUEST_SUPERSEDED`、`retryable=false`；请求在预检期间被另一轮 supersede 时，也应以事务锁内最终状态生成响应。
+
+`READY` 预检结果还携带读取时的最新消息 ID。`beginTurn` 在锁定会话行后重新读取最新 ID；若两者不同，返回可重试的 `CONTEXT_SNAPSHOT_STALE`，且不写 turn/用户消息、不调用 Agent。Assembler 同时校验最新消息查询与 `MAX(id)` 读数一致，避免跨 SQL 查询形成不一致快照。
+
+`SUMMARY_PENDING` 返回 `CONTEXT_SUMMARY_PENDING`；服务/模型不可用或摘要功能关闭时用 `CONTEXT_SUMMARY_UNAVAILABLE`，保留原文和同一 request ID 以便在尚未被后续消息替代时恢复，不提交超预算历史给 Agent；最近窗口超限为终态 `CONTEXT_WINDOW_TOO_LARGE`，并原子保存该轮和用户消息。成功、待整理、不可用和窗口超限等新请求路径持久化较新消息时，都会在同一事务中 supersede 其他不可用请求；旧请求得到不可重试的 `CONTEXT_REQUEST_SUPERSEDED`。READY 后向 `ChatAgent.streamResponse` 传 raw history 与单独的 `userMessage`；如果正在恢复 WAITING_CONTEXT，该轮已存储的用户消息必须从 raw history 中按其最新 ID 排除，不能重复注入。`completeTurn` 才触发异步整理；`deleteSession` 删除 summary/outbox 并阻止晚到 Worker 复活数据。
+- [x] **Step 7: 写集成回归。** 在 `ChatControllerTest` 加 MockMvc 测试：当前 `/stream` Controller 声明 `produces=text/event-stream`，所以必须实际断言预检异常仍被 `GlobalExceptionHandler` 编码为 `application/json` HTTP 200 `Result`，不可只验证 service 异常对象。pending 的 `code=CONTEXT_SUMMARY_PENDING` 且 `data.retryable=true`、`retryAfterMs>0`；服务不可用为 `CONTEXT_SUMMARY_UNAVAILABLE` 且 `data.retryable=true` 并保留相同 ID；最近窗口超限为 `CONTEXT_WINDOW_TOO_LARGE` 且 `data.retryable=false`；后续消息取代的旧请求返回 `CONTEXT_REQUEST_SUPERSEDED` 且 `data.retryable=false`；预检后快照变旧返回可重试 `CONTEXT_SNAPSHOT_STALE`，不持久化该旧请求也不调用 Agent；`data.clientRequestId` 等于请求 ID；不带 ID 的兼容请求首次 pending 后，服务端生成的 ID 出现在响应并被后续同 ID 重试沿用；恢复后 user message 只一条且没有重复加入 Agent history；别人无法触发；删除后摘要/outbox 同事务不存在；Agent mock 收到 summary 但用户 API history 不泄露给其他用户。另验证管理员 DEAD 任务重放权限与操作者/时间审计。仅在 MockMvc 证明必需时修改 `ChatController` 媒体类型声明。
+- [x] **Step 8: 运行后端验证。** `mvn -f server/pom.xml -Dtest=ChatContextAssemblerTest,ChatControllerTest,RealChatAgentContractTest test`；之后运行 `mvn -f server/pom.xml test`。失败时先定位是本批回归还是已有环境/测试依赖问题，记录真实结果，不跳过失败用例。
+- [x] **Step 9: 提交本阶段。** 提交 `feat(server): resume chat turns after context compaction` 并快进合入本地 `master`。
 
 ## Task 6: 前端整理中状态、非 SSE 响应和手动恢复
 
@@ -359,7 +369,7 @@ it('keeps the request id and offers manual retry while context is summarized', a
 })
 ```
 - [ ] **Step 2: 验证测试失败。** 根目录执行 `pnpm test -- src/views/user/consultation.spec.ts`；预期当前代码只显示通用断网文案。
-- [ ] **Step 3: 实现非 SSE 响应解析。** `onopen` 对 `response.clone().json()` 解析 Spring `Result` envelope；pending 显示“正在整理较早的对话”、保留同 ID 和手动“重新检查”；若旧客户端未发送 ID，则从 `data.clientRequestId` 建立 pending storage；unavailable 显示“暂时无法整理，请稍后重试”，保留同 ID 但不显示持续整理状态；窗口超限显示新建会话提示并清理不可重试的 pending 标记。对 401、HTML 错页及非 JSON 仍走当前通用断网恢复逻辑。
+- [ ] **Step 3: 实现非 SSE 响应解析。** `onopen` 对 `response.clone().json()` 解析 Spring `Result` envelope；pending 显示“正在整理较早的对话”、保留同 ID 和手动“重新检查”；若旧客户端未发送 ID，则从 `data.clientRequestId` 建立 pending storage；unavailable 显示“暂时无法整理，请稍后重试”，保留同 ID 但不显示持续整理状态；快照过期显示“会话已有新内容，请重新检查”，保留 ID 并允许用户手动重试；窗口超限显示新建会话提示并清理不可重试的 pending 标记；被后续消息替代时显示“该请求已被后续对话替代”，清除对应 pending 标记且不自动重试。对 401、HTML 错页及非 JSON 仍走当前通用断网恢复逻辑。
 - [ ] **Step 4: 验证刷新与重复语义。** 增加刷新后从后端已保存的最后一条 user message 恢复 `clientRequestId`、同一 retry 沿用 request ID、重复点击不会创建不同 request ID、终态超限不自动重播等测试；运行 `pnpm test -- src/views/user/consultation.spec.ts` 和 `pnpm build`。
 - [ ] **Step 5: 提交本阶段。** 暂存上述两个前端文件，提交 `feat(web): surface resumable context preparation` 并快进合入本地 `master`。
 

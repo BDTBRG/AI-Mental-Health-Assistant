@@ -59,6 +59,7 @@ public class RealChatAgent implements ChatAgent {
     @Override
     public Flux<String> streamResponse(Long sessionId, String userMessage,
                                        List<ConsultationMessage> history,
+                                       Map<String, Object> contextSummary,
                                        Map<String, Object> context) {
         List<Map<String, Object>> messages = new ArrayList<>();
         if (history != null) {
@@ -74,6 +75,7 @@ public class RealChatAgent implements ChatAgent {
         requestBody.put("sessionId", String.valueOf(sessionId));
         requestBody.put("messages", messages);
         requestBody.put("userMessage", userMessage);
+        requestBody.put("contextSummary", contextSummary == null ? Map.of() : contextSummary);
         requestBody.put("context", context == null ? Map.of() : context);
 
         return Flux.defer(() -> {

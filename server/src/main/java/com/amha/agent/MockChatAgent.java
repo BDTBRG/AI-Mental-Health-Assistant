@@ -31,6 +31,7 @@ public class MockChatAgent implements ChatAgent {
     @Override
     public Flux<String> streamResponse(Long sessionId, String userMessage,
                                        List<ConsultationMessage> history,
+                                       Map<String, Object> contextSummary,
                                        Map<String, Object> context) {
         String response;
         if (history == null || history.size() <= 1) {

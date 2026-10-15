@@ -21,7 +21,14 @@ public interface ChatAgent {
      */
     Flux<String> streamResponse(Long sessionId, String userMessage,
                                 List<ConsultationMessage> history,
+                                Map<String, Object> contextSummary,
                                 Map<String, Object> context);
+
+    default Flux<String> streamResponse(Long sessionId, String userMessage,
+                                        List<ConsultationMessage> history,
+                                        Map<String, Object> context) {
+        return streamResponse(sessionId, userMessage, history, Map.of(), context);
+    }
 
     /**
      * 分析会话中的情绪状态

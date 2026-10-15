@@ -231,17 +231,32 @@ class ContextSummaryOutboxServiceTest {
         task.setManualRetryCount(2);
         when(sessionMapper.selectByIdForUpdate(10L)).thenReturn(session(10L, 7L));
         when(outboxMapper.selectBySessionForUpdate(10L)).thenReturn(task);
+        when(outboxMapper.retryDeadForOwner(org.mockito.ArgumentMatchers.eq(10L),
+                org.mockito.ArgumentMatchers.eq(7L), org.mockito.ArgumentMatchers.eq(99L), any(LocalDateTime.class)))
+                .thenReturn(1);
 
         assertEquals(true, service.retryDead(10L, 99L));
 
-        assertEquals("PENDING", task.getStatus());
-        assertEquals(0, task.getAttemptCount());
-        assertEquals(3, task.getManualRetryCount());
-        assertEquals(99L, task.getLastManualRetryBy());
-        org.junit.jupiter.api.Assertions.assertNotNull(task.getLastManualRetryAt());
-        org.junit.jupiter.api.Assertions.assertNotNull(task.getNextAttemptAt());
-        assertNull(task.getLastErrorCode());
-        verify(outboxMapper).updateById(task);
+        verify(outboxMapper).retryDeadForOwner(org.mockito.ArgumentMatchers.eq(10L),
+                org.mockito.ArgumentMatchers.eq(7L), org.mockito.ArgumentMatchers.eq(99L), any(LocalDateTime.class));
+        verify(outboxMapper, never()).updateById(any(ConsultationContextSummaryOutbox.class));
+    }
+
+    @Test
+    void deadTaskRetryRejectsOutboxWhoseOwnerDoesNotMatchTheSession() {
+        ContextSummaryOutboxService service = service();
+        ConsultationContextSummaryOutbox task = task(30L, 10L, 8L, 80L, "DEAD", null);
+        task.setAttemptCount(8);
+        when(sessionMapper.selectByIdForUpdate(10L)).thenReturn(session(10L, 7L));
+        when(outboxMapper.selectBySessionForUpdate(10L)).thenReturn(task);
+
+        assertEquals(false, service.retryDead(10L, 99L));
+
+        assertEquals("DEAD", task.getStatus());
+        assertEquals(8, task.getAttemptCount());
+        assertNull(task.getLastManualRetryBy());
+        verify(outboxMapper, never()).retryDeadForOwner(any(Long.class), any(Long.class), any(Long.class), any(LocalDateTime.class));
+        verify(outboxMapper, never()).updateById(any(ConsultationContextSummaryOutbox.class));
     }
 
     @Test

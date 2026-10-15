@@ -110,6 +110,10 @@ MySQL 是任务权威状态；Redis Streams 仅负责唤醒和分发。建议字
 
 当原始尾部超过 Agent 请求预算时，事务内确保存在摘要任务，并为该请求写入 `WAITING_CONTEXT` turn 与用户消息，持久化请求 hash/session/user/Request ID。该状态不属于生成中的 turn；这让页面刷新后仍可从数据库恢复原文与请求身份，也保证同一个 ID 不重复插入消息。请求返回稳定错误码 `CONTEXT_SUMMARY_PENDING`、`retryable=true` 和建议重试间隔，且在 SSE emitter/响应建立前返回。当前全局业务异常约定使用 HTTP 200 + `Result` envelope，因此本功能沿用 envelope 并在 `data` 中返回重试提示，不全局改变异常 HTTP 状态；前端从非 SSE JSON 响应识别该错误，显示“正在整理较早的对话”，不自动循环重试，用户可在建议间隔后用原 `clientRequestId` 主动重试。重试先重新组装上下文，只有预算满足后才把相同 turn 原子地转为 `RUNNING`；摘要仍未就绪时维持 `WAITING_CONTEXT`。同一 `clientRequestId` 但不同 request hash 返回冲突。不同新 turn 不得越过待整理 turn 开始生成。网络恢复不能自动创建不同 turn。
 
+摘要不可用时，短会话若仍在完整上下文预算内可继续；长会话返回 `CONTEXT_SUMMARY_UNAVAILABLE` 并保留原 turn/request ID。若摘要恢复时尚无较新用户消息持久化，原 ID 可重试并恢复该 turn；若更新的请求已经持久化，旧不可用 turn 在同一会话锁定事务中转为终态 `CONTEXT_SUPERSEDED`，旧 ID 返回 `CONTEXT_REQUEST_SUPERSEDED`、`retryable=false`。前端清理该旧 ID，并继续处理较新的请求，避免旧请求因其消息不再是最新上下文而永久无法恢复。持久化成功、等待、不可用或拒绝的新请求都必须在同一事务内终结更早的 `CONTEXT_UNAVAILABLE` turn；同 ID 恢复不 supersede 自身。
+
+`READY` 上下文快照必须附带组装时观察到的最新消息 ID。Assembler 检查最新消息窗口与 `MAX(id)` 读数一致后才返回 `READY`；随后 `beginTurn` 先锁会话行，再重新读取最新消息 ID。若 ID 已变化，返回可重试的 `CONTEXT_SNAPSHOT_STALE` 和原 `clientRequestId`，不持久化该请求、不调用 Agent。此栅栏避免另一轮在预检与 turn 写入之间完成后，新一轮回答仍基于过期上下文生成。用户重试时保留请求 ID，由服务端重新组装最新快照。
+
 如果最近 12 条原文自身仍超过硬预算，或者有单条消息超过单条上限，则将该 turn 标为终态 `CONTEXT_REJECTED` 并返回 `CONTEXT_WINDOW_TOO_LARGE`，不删改原文，也不尝试基于缺失内容生成回答。产品端提供清楚提示，引导用户开启新会话；当前没有单条消息删除能力，本批不暗示该入口存在。不能自动缩减风险相关上下文。删除会话可以取消其 `WAITING_CONTEXT` turn 和相关摘要任务。
 
 ## 7. Agent 接口与提示词边界
@@ -181,7 +185,7 @@ Spring Boot 的上下文预检错误沿用当前 HTTP 200 `Result` envelope。�
 1. 先发布兼容性代码和 V13 schema，功能开关默认关闭；现有调用仍使用原始历史路径，但同样应用 Agent 请求硬上限并明确超限语义。摘要预检、Outbox 任务创建和模型调用分别受开关控制。
 2. 开启摘要 Outbox/Worker，以合成数据验证失败重试、删除和幂等，再按需为测试会话整理历史。
 3. 小范围开启摘要上下文组装，观察队列等待、摘要失败、上下文 pending、Token 用量和用户重试行为。
-4. 若摘要服务异常，保留已有摘要和全部消息，暂停新任务但保留 Outbox 与 `WAITING_CONTEXT` 状态。短会话若完整上下文仍在预算内可继续；长会话返回明确的 `CONTEXT_SUMMARY_UNAVAILABLE`，不无限显示整理中、不回退成无限长度历史请求。经运维恢复或显式重放后，同一 ID 可重新预检。最近窗口本身超限则终结为 `CONTEXT_REJECTED`。
+4. 若摘要服务异常，保留已有摘要和全部消息，暂停新任务但保留 Outbox 与 `WAITING_CONTEXT` 状态。短会话若完整上下文仍在预算内可继续；长会话返回明确的 `CONTEXT_SUMMARY_UNAVAILABLE`，不无限显示整理中、不回退成无限长度历史请求。经运维恢复或显式重放后，若没有较新用户消息持久化，同一 ID 可重新预检；若较新请求已持久化，旧不可用 turn 转为终态 `CONTEXT_SUPERSEDED` 并返回不可重试的 `CONTEXT_REQUEST_SUPERSEDED`。最近窗口本身超限则终结为 `CONTEXT_REJECTED`。
 5. 数据库表与历史原始消息在回滚时保留；删除派生摘要需走会话删除或单独管理命令，不在应用回滚时自动清库。
 
 ## 12. 待实施确认项

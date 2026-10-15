@@ -93,7 +93,7 @@ public class ChatController {
     }
 
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter streamChat(@RequestBody ChatStreamRequest request,
+    public SseEmitter streamChat(@Valid @RequestBody ChatStreamRequest request,
                                   @RequestHeader(value = "Last-Event-ID", required = false) String lastEventId,
                                   HttpServletRequest httpRequest) {
         Long userId = (Long) httpRequest.getAttribute("userId");

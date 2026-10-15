@@ -10,6 +10,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.boot.test.mock.mockito.SpyBean;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
@@ -24,8 +25,16 @@ import com.amha.entity.ConsultationMessage;
 import com.amha.mapper.ConsultationContextSummaryMapper;
 import com.amha.mapper.ConsultationContextSummaryOutboxMapper;
 import com.amha.mapper.ConsultationMessageMapper;
+import com.amha.mapper.ConsultationSessionMapper;
+import com.amha.mapper.UserMapper;
+import com.amha.entity.User;
+import com.amha.config.ChatContextSummaryProperties;
+import com.amha.service.impl.ChatContextAssembler;
+import com.amha.service.ChatService;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.Map;
+import java.util.List;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HexFormat;
@@ -41,10 +50,13 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.when;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
@@ -74,6 +86,21 @@ class ChatControllerTest {
     private ConsultationMessageMapper consultationMessageMapper;
 
     @Autowired
+    private ConsultationSessionMapper consultationSessionMapper;
+
+    @Autowired
+    private UserMapper userMapper;
+
+    @Autowired
+    private ChatContextSummaryProperties chatContextSummaryProperties;
+
+    @SpyBean
+    private ChatContextAssembler chatContextAssembler;
+
+    @Autowired
+    private ChatService chatService;
+
+    @Autowired
     private EmotionAnalysisOutboxService outboxService;
 
     @Autowired
@@ -82,7 +109,7 @@ class ChatControllerTest {
     @Autowired
     private KnowledgeIndexOutboxService knowledgeIndexOutboxService;
 
-    @MockBean
+    @SpyBean
     private ContextSummaryOutboxService contextSummaryOutboxService;
 
     @Autowired
@@ -336,8 +363,25 @@ class ChatControllerTest {
     @Order(100)
     @DisplayName("摘要任务重放仅管理员可执行且不返回摘要正文")
     void onlyAdminCanRetryDeadContextSummaryWithoutReturningSummaryContent() throws Exception {
-        when(contextSummaryOutboxService.retryDead(eq(sessionId), anyLong())).thenReturn(true);
-        String adminResponse = mockMvc.perform(post("/api/admin/context-summary/" + sessionId + "/retry")
+        Long retrySessionId = createSession(userToken);
+        Long ownerId = jdbcTemplate.queryForObject(
+                "SELECT user_id FROM consultation_session WHERE id = ?", Long.class, retrySessionId);
+        Long adminId = jdbcTemplate.queryForObject(
+                "SELECT id FROM user WHERE username = 'admin'", Long.class);
+        ConsultationContextSummaryOutbox deadTask = new ConsultationContextSummaryOutbox();
+        deadTask.setSessionId(retrySessionId);
+        deadTask.setUserId(ownerId);
+        deadTask.setDesiredThroughMessageId(1L);
+        deadTask.setStatus("DEAD");
+        deadTask.setAttemptCount(8);
+        deadTask.setNextAttemptAt(java.time.LocalDateTime.now().minusMinutes(5));
+        deadTask.setLastErrorCode("UPSTREAM_TIMEOUT");
+        deadTask.setLeaseToken("expired-lease-token");
+        deadTask.setLeaseUntil(java.time.LocalDateTime.now().minusMinutes(1));
+        deadTask.setManualRetryCount(2);
+        contextSummaryOutboxMapper.insert(deadTask);
+
+        String adminResponse = mockMvc.perform(post("/api/admin/context-summary/" + retrySessionId + "/retry")
                         .header("token", adminToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value("200"))
@@ -346,13 +390,29 @@ class ChatControllerTest {
 
         org.junit.jupiter.api.Assertions.assertFalse(adminResponse.contains("summary_json"));
         org.junit.jupiter.api.Assertions.assertFalse(adminResponse.contains("sourceMessageIds"));
-        verify(contextSummaryOutboxService).retryDead(eq(sessionId), anyLong());
+        verify(contextSummaryOutboxService).retryDead(eq(retrySessionId), eq(adminId));
 
-        mockMvc.perform(post("/api/admin/context-summary/" + sessionId + "/retry")
+        ConsultationContextSummaryOutbox retried = contextSummaryOutboxMapper
+                .selectBySessionAndUser(retrySessionId, ownerId);
+        Assertions.assertEquals("PENDING", retried.getStatus());
+        Assertions.assertEquals(0, retried.getAttemptCount());
+        Assertions.assertEquals(3, retried.getManualRetryCount());
+        Assertions.assertEquals(adminId, retried.getLastManualRetryBy());
+        Assertions.assertNotNull(retried.getLastManualRetryAt());
+        Assertions.assertNotNull(retried.getNextAttemptAt());
+        Assertions.assertNull(retried.getLastErrorCode());
+        Assertions.assertNull(retried.getLeaseToken());
+        Assertions.assertNull(retried.getLeaseUntil());
+
+        mockMvc.perform(post("/api/admin/context-summary/" + retrySessionId + "/retry")
                         .header("token", userToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value("403"));
-        verify(contextSummaryOutboxService, times(1)).retryDead(eq(sessionId), anyLong());
+        verify(contextSummaryOutboxService, times(1)).retryDead(eq(retrySessionId), eq(adminId));
+        ConsultationContextSummaryOutbox afterDeniedRetry = contextSummaryOutboxMapper
+                .selectBySessionAndUser(retrySessionId, ownerId);
+        Assertions.assertEquals(3, afterDeniedRetry.getManualRetryCount());
+        Assertions.assertEquals(adminId, afterDeniedRetry.getLastManualRetryBy());
     }
 
     @Test
@@ -389,8 +449,11 @@ class ChatControllerTest {
             task.setDesiredThroughMessageId(second.getId());
             task.setStatus("PENDING");
             task.setAttemptCount(0);
-            task.setNextAttemptAt(java.time.LocalDateTime.now().minusSeconds(1));
+            task.setNextAttemptAt(java.time.LocalDateTime.now().minusDays(1));
             contextSummaryOutboxMapper.insert(task);
+            // This mapper selects globally, so retire earlier synthetic tasks from this test class.
+            jdbcTemplate.update("UPDATE consultation_context_summary_outbox SET status = 'DONE' WHERE session_id <> ?",
+                    testSessionId);
 
             Assertions.assertEquals(task.getId(), contextSummaryOutboxMapper.selectNextReadyForUpdate().getId());
             Assertions.assertEquals(1, contextSummaryMapper.updateSummaryCas(testSessionId, testUserId, 1L,
@@ -485,7 +548,7 @@ class ChatControllerTest {
                 + "\"clientRequestId\":\"" + clientRequestId + "\","
                 + "\"userMessage\":\"" + message + "\"}";
 
-        when(realChatAgent.streamResponse(anyLong(), anyString(), anyList(), anyMap()))
+        when(realChatAgent.streamResponse(anyLong(), anyString(), anyList(), anyMap(), anyMap()))
                 .thenReturn(Flux.just("稳定回复"));
         mockMvc.perform(post("/psychological-chat/stream")
                         .header("token", userToken)
@@ -520,7 +583,7 @@ class ChatControllerTest {
                 "SELECT COUNT(*) FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
                 Integer.class, testSessionId, clientRequestId);
         Assertions.assertEquals(1, savedTurns, "同一 clientRequestId 只能创建一个轮次");
-        verify(realChatAgent, times(1)).streamResponse(anyLong(), anyString(), anyList(), anyMap());
+        verify(realChatAgent, times(1)).streamResponse(anyLong(), anyString(), anyList(), anyMap(), anyMap());
         String turnStatus = jdbcTemplate.queryForObject(
                 "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
                 String.class, testSessionId, clientRequestId);
@@ -544,7 +607,7 @@ class ChatControllerTest {
     @DisplayName("SSE流式对话")
     void testStreamChat() throws Exception {
         Assertions.assertNotNull(sessionId, "会话ID不能为空");
-        when(realChatAgent.streamResponse(anyLong(), anyString(), anyList(), anyMap()))
+        when(realChatAgent.streamResponse(anyLong(), anyString(), anyList(), anyMap(), anyMap()))
                 .thenReturn(Flux.just("测试回复"));
 
         ChatStreamRequest request = new ChatStreamRequest();
@@ -600,6 +663,23 @@ class ChatControllerTest {
                 "SELECT COUNT(*) FROM consultation_chat_turn WHERE session_id = ?",
                 Integer.class, sessionId);
         Assertions.assertTrue(turnCount > 0, "测试会话应包含流式轮次");
+
+        Long ownerId = jdbcTemplate.queryForObject(
+                "SELECT user_id FROM consultation_session WHERE id = ?", Long.class, sessionId);
+        Long summaryTarget = consultationMessageMapper.selectMaxMessageId(sessionId);
+        Assertions.assertNotNull(summaryTarget);
+        String waitingRequestId = "delete-context-" + System.nanoTime();
+        chatTurnStore.waitForContext(sessionId, ownerId, waitingRequestId,
+                "delete-context-request-hash", "等待摘要后删除", summaryTarget);
+        ConsultationContextSummary summary = new ConsultationContextSummary();
+        summary.setSessionId(sessionId);
+        summary.setUserId(ownerId);
+        summary.setSummaryJson("{\"userStatedContext\":[],\"userPreferences\":[],\"openTopics\":[]}");
+        summary.setCoveredThroughMessageId(summaryTarget);
+        summary.setSummaryVersion(1L);
+        summary.setPromptVersion("context-summary-v1");
+        contextSummaryMapper.insert(summary);
+
         mockMvc.perform(delete("/psychological-chat/sessions/" + sessionId)
                         .header("token", userToken))
                 .andExpect(status().isOk())
@@ -614,8 +694,16 @@ class ChatControllerTest {
         Integer purgeTasks = jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM agent_checkpoint_purge_outbox WHERE session_id = ? AND status <> 'DONE'",
                 Integer.class, sessionId);
+        Integer remainingSummaries = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM consultation_context_summary WHERE session_id = ?",
+                Integer.class, sessionId);
+        Integer remainingSummaryTasks = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM consultation_context_summary_outbox WHERE session_id = ?",
+                Integer.class, sessionId);
         Assertions.assertEquals(0, remainingTurns);
         Assertions.assertEquals(0, remainingEvents);
+        Assertions.assertEquals(0, remainingSummaries);
+        Assertions.assertEquals(0, remainingSummaryTasks);
         Assertions.assertTrue(purgeTasks > 0, "删除会话时应在同一事务写入检查点清理任务");
     }
 
@@ -755,7 +843,7 @@ class ChatControllerTest {
         jdbcTemplate.update("UPDATE consultation_chat_turn SET updated_at = DATEADD('MINUTE', -10, CURRENT_TIMESTAMP) "
                 + "WHERE session_id = ? AND client_request_id = ?", testSessionId, requestId);
 
-        when(realChatAgent.streamResponse(anyLong(), anyString(), anyList(), anyMap()))
+        when(realChatAgent.streamResponse(anyLong(), anyString(), anyList(), anyMap(), anyMap()))
                 .thenReturn(Flux.just("recovered-new-response"));
         ChatStreamRequest request = new ChatStreamRequest();
         request.setSessionId(testSessionId.toString());
@@ -772,7 +860,7 @@ class ChatControllerTest {
         awaitTurnCompletion(testSessionId, requestId);
         ArgumentCaptor<Map> agentContextCaptor = ArgumentCaptor.forClass(Map.class);
         verify(realChatAgent, times(1)).streamResponse(
-                anyLong(), anyString(), anyList(), agentContextCaptor.capture());
+                anyLong(), anyString(), anyList(), anyMap(), agentContextCaptor.capture());
         String currentGenerationToken = jdbcTemplate.queryForObject(
                 "SELECT generation_token FROM consultation_chat_turn WHERE session_id = ? "
                         + "AND client_request_id = ?",
@@ -1038,7 +1126,7 @@ class ChatControllerTest {
                 .andReturn().getResponse().getContentAsString();
         long sessionId = objectMapper.readTree(startResponse).path("data").path("sessionId").asLong();
 
-        when(realChatAgent.streamResponse(anyLong(), anyString(), anyList(), anyMap()))
+        when(realChatAgent.streamResponse(anyLong(), anyString(), anyList(), anyMap(), anyMap()))
                 .thenReturn(Flux.just("首轮恢复成功"));
         mockMvc.perform(post("/psychological-chat/stream")
                         .header("token", userToken)
@@ -1057,7 +1145,730 @@ class ChatControllerTest {
         Assertions.assertEquals(1, jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM consultation_message WHERE session_id = ? AND sender_type = 2 AND content = ?",
                 Integer.class, sessionId, "首轮恢复成功"));
-        verify(realChatAgent, times(1)).streamResponse(anyLong(), anyString(), anyList(), anyMap());
+        verify(realChatAgent, times(1)).streamResponse(anyLong(), anyString(), anyList(), anyMap(), anyMap());
+    }
+
+    @Test
+    @Order(24)
+    @DisplayName("摘要待处理在 SSE 建立前返回 JSON 重试提示并保存同一轮")
+    void summaryPendingReturnsJsonEnvelopeBeforeSseAndPersistsTurn() throws Exception {
+        Long testSessionId = createSession(userToken);
+        seedOverflowingHistory(testSessionId);
+        String requestId = "context-pending-" + System.nanoTime();
+        String message = "继续刚才的话题";
+        chatContextSummaryProperties.setPreflightEnabled(true);
+        chatContextSummaryProperties.setWorkerEnabled(true);
+        chatContextSummaryProperties.setAgentEnabled(true);
+        ReflectionTestUtils.setField(chatContextAssembler, "outboxEnabled", true);
+        try {
+            MvcResult result = mockMvc.perform(post("/psychological-chat/stream")
+                            .header("token", userToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                            .content(objectMapper.writeValueAsString(Map.of(
+                                    "sessionId", String.valueOf(testSessionId),
+                                    "clientRequestId", requestId,
+                                    "userMessage", message))))
+                    .andExpect(status().isOk())
+                    .andReturn();
+
+            Assertions.assertFalse(result.getRequest().isAsyncStarted(),
+                    "上下文预检应在创建 SSE emitter 前同步返回");
+            Assertions.assertTrue(MediaType.APPLICATION_JSON.isCompatibleWith(
+                    MediaType.parseMediaType(result.getResponse().getContentType())));
+            Assertions.assertEquals("CONTEXT_SUMMARY_PENDING",
+                    objectMapper.readTree(result.getResponse().getContentAsString()).path("code").asText());
+            Assertions.assertEquals(requestId,
+                    objectMapper.readTree(result.getResponse().getContentAsString())
+                            .path("data").path("clientRequestId").asText());
+            Assertions.assertTrue(objectMapper.readTree(result.getResponse().getContentAsString())
+                    .path("data").path("retryable").asBoolean());
+            Assertions.assertTrue(objectMapper.readTree(result.getResponse().getContentAsString())
+                    .path("data").path("retryAfterMs").asLong() > 0);
+            Assertions.assertEquals(1, jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM consultation_message WHERE session_id = ? AND sender_type = 1 AND content = ?",
+                    Integer.class, testSessionId, message));
+            Assertions.assertEquals("WAITING_CONTEXT", jdbcTemplate.queryForObject(
+                    "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                    String.class, testSessionId, requestId));
+            verify(contextSummaryOutboxService).enqueue(eq(testSessionId), anyLong(), anyLong());
+            verify(realChatAgent, never()).streamResponse(anyLong(), anyString(), anyList(), anyMap(), anyMap());
+        } finally {
+            chatContextSummaryProperties.setPreflightEnabled(false);
+            chatContextSummaryProperties.setWorkerEnabled(false);
+            chatContextSummaryProperties.setAgentEnabled(false);
+            ReflectionTestUtils.setField(chatContextAssembler, "outboxEnabled", false);
+        }
+    }
+
+    @Test
+    @Order(25)
+    @DisplayName("摘要功能不可用时保留请求 ID 并返回可恢复错误")
+    void unavailableSummaryReturnsRetryableEnvelopeAndDoesNotCallAgent() throws Exception {
+        Long testSessionId = createSession(userToken);
+        seedOverflowingHistory(testSessionId);
+        String requestId = "context-unavailable-" + System.nanoTime();
+        String message = "同一请求稍后继续";
+
+        MvcResult result = mockMvc.perform(post("/psychological-chat/stream")
+                        .header("token", userToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "sessionId", String.valueOf(testSessionId),
+                                "clientRequestId", requestId,
+                                "userMessage", message))))
+                .andExpect(status().isOk())
+                .andReturn();
+
+        var json = objectMapper.readTree(result.getResponse().getContentAsString());
+        Assertions.assertEquals("CONTEXT_SUMMARY_UNAVAILABLE", json.path("code").asText());
+        Assertions.assertEquals(requestId, json.path("data").path("clientRequestId").asText());
+        Assertions.assertTrue(json.path("data").path("retryable").asBoolean());
+        Assertions.assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM consultation_message WHERE session_id = ? AND sender_type = 1 AND content = ?",
+                Integer.class, testSessionId, message));
+        Assertions.assertEquals("CONTEXT_UNAVAILABLE", jdbcTemplate.queryForObject(
+                "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                String.class, testSessionId, requestId));
+        Assertions.assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                Integer.class, testSessionId, requestId));
+
+        mockMvc.perform(post("/psychological-chat/stream")
+                        .header("token", userToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "sessionId", String.valueOf(testSessionId),
+                                "clientRequestId", "second-unavailable-" + System.nanoTime(),
+                                "userMessage", "另一条消息也不应被永久阻塞"))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("CONTEXT_SUMMARY_UNAVAILABLE"));
+        verify(realChatAgent, never()).streamResponse(anyLong(), anyString(), anyList(), anyMap(), anyMap());
+    }
+
+    @Test
+    @Order(29)
+    @DisplayName("摘要任务不可用时释放已有等待轮次，摘要恢复后可用原请求 ID 继续")
+    void unavailableSummaryReleasesWaitingTurnAndAllowsRecovery() throws Exception {
+        Long testSessionId = createSession(userToken);
+        seedOverflowingHistory(testSessionId);
+        String requestId = "context-recovery-" + System.nanoTime();
+        String message = "我希望在摘要服务恢复后继续";
+        chatContextSummaryProperties.setPreflightEnabled(true);
+        chatContextSummaryProperties.setWorkerEnabled(true);
+        chatContextSummaryProperties.setAgentEnabled(true);
+        ReflectionTestUtils.setField(chatContextAssembler, "outboxEnabled", true);
+        try {
+            mockMvc.perform(post("/psychological-chat/stream")
+                            .header("token", userToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                            .content(objectMapper.writeValueAsString(Map.of(
+                                    "sessionId", String.valueOf(testSessionId),
+                                    "clientRequestId", requestId,
+                                    "userMessage", message))))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value("CONTEXT_SUMMARY_PENDING"));
+
+            jdbcTemplate.update("UPDATE consultation_context_summary_outbox SET status = 'DEAD' WHERE session_id = ?",
+                    testSessionId);
+            chatContextSummaryProperties.setPreflightEnabled(false);
+            chatContextSummaryProperties.setWorkerEnabled(false);
+            chatContextSummaryProperties.setAgentEnabled(false);
+            ReflectionTestUtils.setField(chatContextAssembler, "outboxEnabled", false);
+
+            mockMvc.perform(post("/psychological-chat/stream")
+                            .header("token", userToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                            .content(objectMapper.writeValueAsString(Map.of(
+                                    "sessionId", String.valueOf(testSessionId),
+                                    "clientRequestId", requestId,
+                                    "userMessage", message))))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value("CONTEXT_SUMMARY_UNAVAILABLE"));
+            Assertions.assertEquals("CONTEXT_UNAVAILABLE", jdbcTemplate.queryForObject(
+                    "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                    String.class, testSessionId, requestId));
+
+            Long ownerId = jdbcTemplate.queryForObject(
+                    "SELECT user_id FROM consultation_session WHERE id = ?", Long.class, testSessionId);
+            Long firstMessageId = jdbcTemplate.queryForObject(
+                    "SELECT MIN(id) FROM consultation_message WHERE session_id = ?", Long.class, testSessionId);
+            ConsultationContextSummary summary = new ConsultationContextSummary();
+            summary.setSessionId(testSessionId);
+            summary.setUserId(ownerId);
+            summary.setSummaryJson("{\"userStatedContext\":[{\"text\":\"较早上下文已恢复\","
+                    + "\"sourceMessageIds\":[" + firstMessageId
+                    + "]}],\"userPreferences\":[],\"openTopics\":[]}");
+            summary.setCoveredThroughMessageId(firstMessageId);
+            summary.setSummaryVersion(1L);
+            summary.setPromptVersion("context-summary-v1");
+            contextSummaryMapper.insert(summary);
+            chatContextSummaryProperties.setPreflightEnabled(true);
+            chatContextSummaryProperties.setWorkerEnabled(true);
+            chatContextSummaryProperties.setAgentEnabled(true);
+            ReflectionTestUtils.setField(chatContextAssembler, "outboxEnabled", true);
+            when(realChatAgent.streamResponse(anyLong(), anyString(), anyList(), anyMap(), anyMap()))
+                    .thenReturn(Flux.just("恢复后的回答"));
+
+            mockMvc.perform(post("/psychological-chat/stream")
+                            .header("token", userToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                            .content(objectMapper.writeValueAsString(Map.of(
+                                    "sessionId", String.valueOf(testSessionId),
+                                    "clientRequestId", requestId,
+                                    "userMessage", message))))
+                    .andExpect(status().isOk());
+            awaitTurnCompletion(testSessionId, requestId);
+            Assertions.assertEquals("COMPLETED", jdbcTemplate.queryForObject(
+                    "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                    String.class, testSessionId, requestId));
+            verify(realChatAgent).streamResponse(eq(testSessionId), eq(message), anyList(), anyMap(), anyMap());
+        } finally {
+            chatContextSummaryProperties.setPreflightEnabled(false);
+            chatContextSummaryProperties.setWorkerEnabled(false);
+            chatContextSummaryProperties.setAgentEnabled(false);
+            ReflectionTestUtils.setField(chatContextAssembler, "outboxEnabled", false);
+        }
+    }
+
+    @Test
+    @Order(32)
+    @DisplayName("新轮次启动后旧的上下文不可用请求转为不可重试，避免恢复越序")
+    void laterTurnSupersedesUnavailableRequestAndOldRequestCannotResume() throws Exception {
+        Long testSessionId = createSession(userToken);
+        seedOverflowingHistory(testSessionId);
+        String oldRequestId = "context-superseded-" + System.nanoTime();
+        String oldMessage = "先前请求在摘要服务恢复后继续";
+        String nextRequestId = "context-after-unavailable-" + System.nanoTime();
+        String nextMessage = "先继续新的对话轮次";
+        chatContextSummaryProperties.setPreflightEnabled(true);
+        chatContextSummaryProperties.setWorkerEnabled(true);
+        chatContextSummaryProperties.setAgentEnabled(true);
+        ReflectionTestUtils.setField(chatContextAssembler, "outboxEnabled", true);
+        try {
+            mockMvc.perform(post("/psychological-chat/stream")
+                            .header("token", userToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                            .content(objectMapper.writeValueAsString(Map.of(
+                                    "sessionId", String.valueOf(testSessionId),
+                                    "clientRequestId", oldRequestId,
+                                    "userMessage", oldMessage))))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value("CONTEXT_SUMMARY_PENDING"));
+
+            jdbcTemplate.update("UPDATE consultation_context_summary_outbox SET status = 'DEAD' WHERE session_id = ?",
+                    testSessionId);
+            chatContextSummaryProperties.setPreflightEnabled(false);
+            chatContextSummaryProperties.setWorkerEnabled(false);
+            chatContextSummaryProperties.setAgentEnabled(false);
+            ReflectionTestUtils.setField(chatContextAssembler, "outboxEnabled", false);
+
+            mockMvc.perform(post("/psychological-chat/stream")
+                            .header("token", userToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                            .content(objectMapper.writeValueAsString(Map.of(
+                                    "sessionId", String.valueOf(testSessionId),
+                                    "clientRequestId", oldRequestId,
+                                    "userMessage", oldMessage))))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value("CONTEXT_SUMMARY_UNAVAILABLE"));
+
+            Long ownerId = jdbcTemplate.queryForObject(
+                    "SELECT user_id FROM consultation_session WHERE id = ?", Long.class, testSessionId);
+            Long firstMessageId = jdbcTemplate.queryForObject(
+                    "SELECT MIN(id) FROM consultation_message WHERE session_id = ?", Long.class, testSessionId);
+            ConsultationContextSummary summary = new ConsultationContextSummary();
+            summary.setSessionId(testSessionId);
+            summary.setUserId(ownerId);
+            summary.setSummaryJson("{\"userStatedContext\":[{\"text\":\"较早上下文已恢复\","
+                    + "\"sourceMessageIds\":[" + firstMessageId
+                    + "]}],\"userPreferences\":[],\"openTopics\":[]}");
+            summary.setCoveredThroughMessageId(firstMessageId);
+            summary.setSummaryVersion(1L);
+            summary.setPromptVersion("context-summary-v1");
+            contextSummaryMapper.insert(summary);
+            chatContextSummaryProperties.setPreflightEnabled(true);
+            chatContextSummaryProperties.setWorkerEnabled(true);
+            chatContextSummaryProperties.setAgentEnabled(true);
+            ReflectionTestUtils.setField(chatContextAssembler, "outboxEnabled", true);
+            when(realChatAgent.streamResponse(anyLong(), anyString(), anyList(), anyMap(), anyMap()))
+                    .thenReturn(Flux.just("继续对话的回答"));
+
+            mockMvc.perform(post("/psychological-chat/stream")
+                            .header("token", userToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                            .content(objectMapper.writeValueAsString(Map.of(
+                                    "sessionId", String.valueOf(testSessionId),
+                                    "clientRequestId", nextRequestId,
+                                    "userMessage", nextMessage))))
+                    .andExpect(status().isOk());
+            awaitTurnCompletion(testSessionId, nextRequestId);
+            Assertions.assertEquals("CONTEXT_SUPERSEDED", jdbcTemplate.queryForObject(
+                    "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                    String.class, testSessionId, oldRequestId));
+
+            mockMvc.perform(post("/psychological-chat/stream")
+                            .header("token", userToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                            .content(objectMapper.writeValueAsString(Map.of(
+                                    "sessionId", String.valueOf(testSessionId),
+                                    "clientRequestId", oldRequestId,
+                                    "userMessage", oldMessage))))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value("CONTEXT_REQUEST_SUPERSEDED"))
+                    .andExpect(jsonPath("$.data.retryable").value(false))
+                    .andExpect(jsonPath("$.data.clientRequestId").value(oldRequestId));
+            verify(realChatAgent).streamResponse(eq(testSessionId), eq(nextMessage), anyList(), anyMap(), anyMap());
+        } finally {
+            chatContextSummaryProperties.setPreflightEnabled(false);
+            chatContextSummaryProperties.setWorkerEnabled(false);
+            chatContextSummaryProperties.setAgentEnabled(false);
+            ReflectionTestUtils.setField(chatContextAssembler, "outboxEnabled", false);
+        }
+    }
+
+    @Test
+    @Order(33)
+    @DisplayName("后续待整理、不可用或超限请求持久化后也终结旧的不可用请求")
+    void persistedWaitingUnavailableAndRejectedTurnsSupersedeOlderUnavailableTurns() throws Exception {
+        try {
+            Long waitingSessionId = createSession(userToken);
+            seedOverflowingHistory(waitingSessionId);
+            String waitingOldId = "old-before-waiting-" + System.nanoTime();
+            String waitingOldMessage = "等待请求前的不可用消息";
+            mockMvc.perform(post("/psychological-chat/stream")
+                            .header("token", userToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                            .content(objectMapper.writeValueAsString(Map.of(
+                                    "sessionId", String.valueOf(waitingSessionId),
+                                    "clientRequestId", waitingOldId,
+                                    "userMessage", waitingOldMessage))))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value("CONTEXT_SUMMARY_UNAVAILABLE"));
+
+            chatContextSummaryProperties.setPreflightEnabled(true);
+            chatContextSummaryProperties.setWorkerEnabled(true);
+            chatContextSummaryProperties.setAgentEnabled(true);
+            ReflectionTestUtils.setField(chatContextAssembler, "outboxEnabled", true);
+            String waitingNextId = "next-waiting-" + System.nanoTime();
+            mockMvc.perform(post("/psychological-chat/stream")
+                            .header("token", userToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                            .content(objectMapper.writeValueAsString(Map.of(
+                                    "sessionId", String.valueOf(waitingSessionId),
+                                    "clientRequestId", waitingNextId,
+                                    "userMessage", "后续请求进入待整理"))))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value("CONTEXT_SUMMARY_PENDING"));
+            Assertions.assertEquals("CONTEXT_SUPERSEDED", jdbcTemplate.queryForObject(
+                    "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                    String.class, waitingSessionId, waitingOldId));
+            Assertions.assertEquals("WAITING_CONTEXT", jdbcTemplate.queryForObject(
+                    "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                    String.class, waitingSessionId, waitingNextId));
+
+            chatContextSummaryProperties.setPreflightEnabled(false);
+            chatContextSummaryProperties.setWorkerEnabled(false);
+            chatContextSummaryProperties.setAgentEnabled(false);
+            ReflectionTestUtils.setField(chatContextAssembler, "outboxEnabled", false);
+
+            Long unavailableSessionId = createSession(userToken);
+            seedOverflowingHistory(unavailableSessionId);
+            String unavailableOldId = "old-before-unavailable-" + System.nanoTime();
+            mockMvc.perform(post("/psychological-chat/stream")
+                            .header("token", userToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                            .content(objectMapper.writeValueAsString(Map.of(
+                                    "sessionId", String.valueOf(unavailableSessionId),
+                                    "clientRequestId", unavailableOldId,
+                                    "userMessage", "不可用请求前的消息"))))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value("CONTEXT_SUMMARY_UNAVAILABLE"));
+            String unavailableNextId = "next-unavailable-" + System.nanoTime();
+            mockMvc.perform(post("/psychological-chat/stream")
+                            .header("token", userToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                            .content(objectMapper.writeValueAsString(Map.of(
+                                    "sessionId", String.valueOf(unavailableSessionId),
+                                    "clientRequestId", unavailableNextId,
+                                    "userMessage", "后续摘要服务仍不可用"))))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value("CONTEXT_SUMMARY_UNAVAILABLE"));
+            Assertions.assertEquals("CONTEXT_SUPERSEDED", jdbcTemplate.queryForObject(
+                    "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                    String.class, unavailableSessionId, unavailableOldId));
+            Assertions.assertEquals("CONTEXT_UNAVAILABLE", jdbcTemplate.queryForObject(
+                    "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                    String.class, unavailableSessionId, unavailableNextId));
+
+            Long rejectedSessionId = createSession(userToken);
+            seedOverflowingHistory(rejectedSessionId);
+            String rejectedOldId = "old-before-rejected-" + System.nanoTime();
+            mockMvc.perform(post("/psychological-chat/stream")
+                            .header("token", userToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                            .content(objectMapper.writeValueAsString(Map.of(
+                                    "sessionId", String.valueOf(rejectedSessionId),
+                                    "clientRequestId", rejectedOldId,
+                                    "userMessage", "超限请求前的不可用消息"))))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value("CONTEXT_SUMMARY_UNAVAILABLE"));
+            seedOversizedRecentHistory(rejectedSessionId);
+            String rejectedNextId = "next-rejected-" + System.nanoTime();
+            mockMvc.perform(post("/psychological-chat/stream")
+                            .header("token", userToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                            .content(objectMapper.writeValueAsString(Map.of(
+                                    "sessionId", String.valueOf(rejectedSessionId),
+                                    "clientRequestId", rejectedNextId,
+                                    "userMessage", "后续请求超过最近上下文窗口"))))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value("CONTEXT_WINDOW_TOO_LARGE"));
+            Assertions.assertEquals("CONTEXT_SUPERSEDED", jdbcTemplate.queryForObject(
+                    "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                    String.class, rejectedSessionId, rejectedOldId));
+            Assertions.assertEquals("CONTEXT_REJECTED", jdbcTemplate.queryForObject(
+                    "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                    String.class, rejectedSessionId, rejectedNextId));
+        } finally {
+            chatContextSummaryProperties.setPreflightEnabled(false);
+            chatContextSummaryProperties.setWorkerEnabled(false);
+            chatContextSummaryProperties.setAgentEnabled(false);
+            ReflectionTestUtils.setField(chatContextAssembler, "outboxEnabled", false);
+        }
+    }
+
+    @Test
+    @Order(30)
+    @DisplayName("单条超长消息在接口层拒绝，不写入会话或轮次")
+    void rejectsOversizedSingleMessageBeforePersistence() throws Exception {
+        Long testSessionId = createSession(userToken);
+        String requestId = "too-large-message-" + System.nanoTime();
+        String oversizedMessage = "x".repeat(8_001);
+
+        mockMvc.perform(post("/psychological-chat/stream")
+                        .header("token", userToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "sessionId", String.valueOf(testSessionId),
+                                "clientRequestId", requestId,
+                                "userMessage", oversizedMessage))))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("400"));
+
+        Assertions.assertEquals(0, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM consultation_message WHERE session_id = ? AND sender_type = 1 AND content = ?",
+                Integer.class, testSessionId, oversizedMessage));
+        Assertions.assertEquals(0, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                Integer.class, testSessionId, requestId));
+        verify(realChatAgent, never()).streamResponse(anyLong(), anyString(), anyList(), anyMap(), anyMap());
+    }
+
+    @Test
+    @Order(31)
+    @DisplayName("允许范围内的长消息保留正文并将会话预览限制在数据库列宽内")
+    void acceptedLongMessagesKeepFullBodyAndBoundSessionPreview() throws Exception {
+        Long testSessionId = createSession(userToken);
+        String requestId = "long-message-" + System.nanoTime();
+        String longMessage = "用户补充的背景".repeat(250);
+        String longAnswer = "AI回复内容".repeat(250);
+        when(realChatAgent.streamResponse(anyLong(), anyString(), anyList(), anyMap(), anyMap()))
+                .thenReturn(Flux.just(longAnswer));
+
+        mockMvc.perform(post("/psychological-chat/stream")
+                        .header("token", userToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "sessionId", String.valueOf(testSessionId),
+                                "clientRequestId", requestId,
+                                "userMessage", longMessage))))
+                .andExpect(status().isOk());
+        awaitTurnCompletion(testSessionId, requestId);
+
+        Assertions.assertEquals(longMessage, jdbcTemplate.queryForObject(
+                "SELECT content FROM consultation_message WHERE session_id = ? AND sender_type = 1 "
+                        + "AND content = ?", String.class, testSessionId, longMessage));
+        Assertions.assertEquals(longAnswer, jdbcTemplate.queryForObject(
+                "SELECT content FROM consultation_message WHERE session_id = ? AND sender_type = 2 "
+                        + "AND content = ?", String.class, testSessionId, longAnswer));
+        Assertions.assertEquals(1000, jdbcTemplate.queryForObject(
+                "SELECT CHAR_LENGTH(last_message_content) FROM consultation_session WHERE id = ?",
+                Integer.class, testSessionId));
+    }
+
+    @Test
+    @Order(26)
+    @DisplayName("最近原文窗口超限时保存终态与服务端请求 ID，重试不重复落库")
+    void oversizedRecentWindowUsesTerminalContextErrorAndGeneratedRequestId() throws Exception {
+        Long testSessionId = createSession(userToken);
+        seedOversizedRecentHistory(testSessionId);
+        String message = "继续这个话题";
+        String requestBody = objectMapper.writeValueAsString(Map.of(
+                "sessionId", String.valueOf(testSessionId),
+                "userMessage", message));
+
+        MvcResult first = mockMvc.perform(post("/psychological-chat/stream")
+                        .header("token", userToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                        .content(requestBody))
+                .andExpect(status().isOk())
+                .andReturn();
+        Assertions.assertFalse(first.getRequest().isAsyncStarted());
+        var firstJson = objectMapper.readTree(first.getResponse().getContentAsString());
+        Assertions.assertEquals("CONTEXT_WINDOW_TOO_LARGE", firstJson.path("code").asText());
+        Assertions.assertFalse(firstJson.path("data").path("retryable").asBoolean());
+        String generatedRequestId = firstJson.path("data").path("clientRequestId").asText();
+        Assertions.assertFalse(generatedRequestId.isBlank());
+
+        mockMvc.perform(post("/psychological-chat/stream")
+                        .header("token", userToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "sessionId", String.valueOf(testSessionId),
+                                "clientRequestId", generatedRequestId,
+                                "userMessage", message))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("CONTEXT_WINDOW_TOO_LARGE"))
+                .andExpect(jsonPath("$.data.clientRequestId").value(generatedRequestId));
+
+        Assertions.assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM consultation_message WHERE session_id = ? AND sender_type = 1 AND content = ?",
+                Integer.class, testSessionId, message));
+        Assertions.assertEquals("CONTEXT_REJECTED", jdbcTemplate.queryForObject(
+                "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                String.class, testSessionId, generatedRequestId));
+        Assertions.assertEquals(1, jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                Integer.class, testSessionId, generatedRequestId));
+        verify(realChatAgent, never()).streamResponse(anyLong(), anyString(), anyList(), anyMap(), anyMap());
+    }
+
+    @Test
+    @Order(27)
+    @DisplayName("待摘要首轮在请求 ID 恢复后只注入摘要一次且不泄露给会话消息 API")
+    void waitingContextRetryRestoresGeneratedRequestIdAndInjectsSummarySeparately() throws Exception {
+        Long testSessionId = createSession(userToken);
+        seedOverflowingHistory(testSessionId);
+        String message = "请接着之前的内容继续";
+        String summaryText = "用户较早提到工作压力明显";
+        chatContextSummaryProperties.setPreflightEnabled(true);
+        chatContextSummaryProperties.setWorkerEnabled(true);
+        chatContextSummaryProperties.setAgentEnabled(true);
+        ReflectionTestUtils.setField(chatContextAssembler, "outboxEnabled", true);
+        try {
+            MvcResult pending = mockMvc.perform(post("/psychological-chat/stream")
+                            .header("token", userToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                            .content(objectMapper.writeValueAsString(Map.of(
+                                    "sessionId", String.valueOf(testSessionId),
+                                    "userMessage", message))))
+                    .andExpect(status().isOk())
+                    .andReturn();
+            var pendingJson = objectMapper.readTree(pending.getResponse().getContentAsString());
+            Assertions.assertEquals("CONTEXT_SUMMARY_PENDING", pendingJson.path("code").asText());
+            String generatedRequestId = pendingJson.path("data").path("clientRequestId").asText();
+            Assertions.assertFalse(generatedRequestId.isBlank());
+
+            Long ownerId = jdbcTemplate.queryForObject(
+                    "SELECT user_id FROM consultation_session WHERE id = ?", Long.class, testSessionId);
+            Long summaryWatermark = jdbcTemplate.queryForObject(
+                    "SELECT MIN(id) FROM consultation_message WHERE session_id = ?",
+                    Long.class, testSessionId);
+            ConsultationContextSummary summary = new ConsultationContextSummary();
+            summary.setSessionId(testSessionId);
+            summary.setUserId(ownerId);
+            summary.setSummaryJson("{\"userStatedContext\":[{\"text\":\"" + summaryText
+                    + "\",\"sourceMessageIds\":[" + summaryWatermark
+                    + "]}],\"userPreferences\":[],\"openTopics\":[]}");
+            summary.setCoveredThroughMessageId(summaryWatermark);
+            summary.setSummaryVersion(1L);
+            summary.setPromptVersion("context-summary-v1");
+            contextSummaryMapper.insert(summary);
+
+            when(realChatAgent.streamResponse(anyLong(), anyString(), anyList(), anyMap(), anyMap()))
+                    .thenReturn(Flux.just("我会结合前面的背景继续回应"));
+            mockMvc.perform(post("/psychological-chat/stream")
+                            .header("token", userToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                            .content(objectMapper.writeValueAsString(Map.of(
+                                    "sessionId", String.valueOf(testSessionId),
+                                    "clientRequestId", generatedRequestId,
+                                    "userMessage", message))))
+                    .andExpect(status().isOk());
+            awaitTurnCompletion(testSessionId, generatedRequestId);
+
+            ArgumentCaptor<List<ConsultationMessage>> historyCaptor = ArgumentCaptor.forClass(List.class);
+            ArgumentCaptor<Map<String, Object>> summaryCaptor = ArgumentCaptor.forClass(Map.class);
+            verify(realChatAgent).streamResponse(eq(testSessionId), eq(message), historyCaptor.capture(),
+                    summaryCaptor.capture(), anyMap());
+            Assertions.assertEquals(11, historyCaptor.getValue().size());
+            Assertions.assertTrue(historyCaptor.getValue().stream()
+                    .noneMatch(item -> message.equals(item.getContent())));
+            Map<?, ?> summaryEntry = (Map<?, ?>) ((List<?>) summaryCaptor.getValue()
+                    .get("userStatedContext")).get(0);
+            Assertions.assertEquals(summaryText, summaryEntry.get("text"));
+            Assertions.assertEquals(summaryWatermark,
+                    ((Number) ((List<?>) summaryEntry.get("sourceMessageIds")).get(0)).longValue());
+            Assertions.assertEquals(1, jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM consultation_message WHERE session_id = ? AND sender_type = 1 AND content = ?",
+                    Integer.class, testSessionId, message));
+
+            MvcResult messagesResponse = mockMvc.perform(get(
+                            "/psychological-chat/sessions/" + testSessionId + "/messages")
+                            .header("token", userToken))
+                    .andExpect(status().isOk())
+                    .andReturn();
+            String messagePayload = messagesResponse.getResponse().getContentAsString();
+            Assertions.assertFalse(messagePayload.contains(summaryText));
+            Assertions.assertFalse(messagePayload.contains("sourceMessageIds"));
+        } finally {
+            chatContextSummaryProperties.setPreflightEnabled(false);
+            chatContextSummaryProperties.setWorkerEnabled(false);
+            chatContextSummaryProperties.setAgentEnabled(false);
+            ReflectionTestUtils.setField(chatContextAssembler, "outboxEnabled", false);
+        }
+    }
+
+    @Test
+    @Order(28)
+    @DisplayName("非所有者不能通过长会话预检创建待摘要轮次或 Outbox")
+    void otherUserCannotCreateSummaryWorkForLongSession() throws Exception {
+        Long testSessionId = createSession(userToken);
+        seedOverflowingHistory(testSessionId);
+        String requestId = "foreign-context-" + System.nanoTime();
+        chatContextSummaryProperties.setPreflightEnabled(true);
+        chatContextSummaryProperties.setWorkerEnabled(true);
+        chatContextSummaryProperties.setAgentEnabled(true);
+        ReflectionTestUtils.setField(chatContextAssembler, "outboxEnabled", true);
+        try {
+            mockMvc.perform(post("/psychological-chat/stream")
+                            .header("token", otherUserToken)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .accept(MediaType.TEXT_EVENT_STREAM_VALUE)
+                            .content(objectMapper.writeValueAsString(Map.of(
+                                    "sessionId", String.valueOf(testSessionId),
+                                    "clientRequestId", requestId,
+                                    "userMessage", "不能跨用户提交摘要任务"))))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.code").value("403"));
+
+            Assertions.assertEquals(0, jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                    Integer.class, testSessionId, requestId));
+            Assertions.assertEquals(0, jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM consultation_message WHERE session_id = ? AND sender_type = 1 AND content = ?",
+                    Integer.class, testSessionId, "不能跨用户提交摘要任务"));
+            Assertions.assertEquals(0, jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM consultation_context_summary_outbox WHERE session_id = ?",
+                    Integer.class, testSessionId));
+            verify(realChatAgent, never()).streamResponse(anyLong(), anyString(), anyList(), anyMap(), anyMap());
+        } finally {
+            chatContextSummaryProperties.setPreflightEnabled(false);
+            chatContextSummaryProperties.setWorkerEnabled(false);
+            chatContextSummaryProperties.setAgentEnabled(false);
+            ReflectionTestUtils.setField(chatContextAssembler, "outboxEnabled", false);
+        }
+    }
+
+    @Test
+    @Order(34)
+    @DisplayName("预检后的会话快照过期时拒绝使用旧上下文生成")
+    void stalePreparedSnapshotCannotStartAfterAnotherTurnCompletes() throws Exception {
+        Long testSessionId = createSession(userToken);
+        Long ownerId = jdbcTemplate.queryForObject(
+                "SELECT user_id FROM consultation_session WHERE id = ?", Long.class, testSessionId);
+        String staleMessage = "预检完成后才提交的旧快照请求";
+        String interveningMessage = "先完成的新一轮消息";
+        String interveningRequestId = "intervening-" + System.nanoTime();
+        CountDownLatch snapshotPrepared = new CountDownLatch(1);
+        CountDownLatch releaseSnapshot = new CountDownLatch(1);
+
+        doAnswer(invocation -> {
+            ChatContextPreparation prepared = (ChatContextPreparation) invocation.callRealMethod();
+            if (staleMessage.equals(invocation.getArgument(2))) {
+                snapshotPrepared.countDown();
+                if (!releaseSnapshot.await(10, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Test did not release prepared chat context");
+                }
+            }
+            return prepared;
+        }).when(chatContextAssembler).prepare(anyLong(), anyLong(), anyString(), anyBoolean(), anyMap());
+
+        ChatStreamRequest request = new ChatStreamRequest();
+        request.setSessionId(testSessionId.toString());
+        request.setClientRequestId("stale-snapshot-" + System.nanoTime());
+        request.setUserMessage(staleMessage);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> pendingRequest = executor.submit(() -> chatService.streamChat(request, ownerId, 0L));
+            Assertions.assertTrue(snapshotPrepared.await(10, TimeUnit.SECONDS),
+                    "The stale request must pause after context preflight");
+
+            ChatTurnStore.TurnStart intervening = chatTurnStore.beginTurn(testSessionId, ownerId,
+                    interveningRequestId, sha256Unchecked(interveningMessage), interveningMessage);
+            chatTurnStore.completeTurn(testSessionId, interveningRequestId, intervening.generationToken(),
+                    "intervening reply", 0, "{\"code\":\"200\",\"data\":{\"done\":true}}");
+
+            releaseSnapshot.countDown();
+            java.util.concurrent.ExecutionException executionError = Assertions.assertThrows(
+                    java.util.concurrent.ExecutionException.class,
+                    () -> pendingRequest.get(10, TimeUnit.SECONDS));
+            Assertions.assertInstanceOf(com.amha.common.ChatContextPreparationException.class,
+                    executionError.getCause());
+            Assertions.assertEquals("CONTEXT_SNAPSHOT_STALE",
+                    ((com.amha.common.ChatContextPreparationException) executionError.getCause()).getErrorCode());
+            Assertions.assertEquals(0, jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM consultation_message WHERE session_id = ? "
+                            + "AND sender_type = 1 AND content = ?",
+                    Integer.class, testSessionId, staleMessage));
+            verify(realChatAgent, never()).streamResponse(eq(testSessionId), eq(staleMessage),
+                    anyList(), anyMap(), anyMap());
+        } finally {
+            releaseSnapshot.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    private void seedOverflowingHistory(Long targetSessionId) {
+        for (int index = 0; index < 12; index++) {
+            ConsultationMessage message = new ConsultationMessage();
+            message.setSessionId(targetSessionId);
+            message.setSenderType(index % 2 == 0 ? 1 : 2);
+            message.setContent("history-" + index + "-" + "x".repeat(2_800));
+            consultationMessageMapper.insert(message);
+        }
+    }
+
+    private void seedOversizedRecentHistory(Long targetSessionId) {
+        for (int index = 0; index < 12; index++) {
+            ConsultationMessage message = new ConsultationMessage();
+            message.setSessionId(targetSessionId);
+            message.setSenderType(index % 2 == 0 ? 1 : 2);
+            message.setContent("recent-" + index + "-" + "x".repeat(3_000));
+            consultationMessageMapper.insert(message);
+        }
     }
 
     @Test

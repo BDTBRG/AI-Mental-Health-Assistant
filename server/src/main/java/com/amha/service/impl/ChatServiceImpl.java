@@ -2,8 +2,10 @@ package com.amha.service.impl;
 
 import com.amha.agent.ChatAgent;
 import com.amha.common.BusinessException;
+import com.amha.common.ChatContextPreparationException;
 import com.amha.common.PageResult;
 import com.amha.common.SessionIdParser;
+import com.amha.config.ChatContextSummaryProperties;
 import com.amha.dto.*;
 import com.amha.entity.ConsultationMessage;
 import com.amha.entity.ConsultationChatTurn;
@@ -69,6 +71,8 @@ public class ChatServiceImpl implements ChatService {
     private final AgentCheckpointPurgeOutboxService checkpointPurgeOutboxService;
     private final ContextSummaryOutboxService contextSummaryOutboxService;
     private final ChatTurnStore chatTurnStore;
+    private final ChatContextAssembler chatContextAssembler;
+    private final ChatContextSummaryProperties chatContextSummaryProperties;
     private final EmotionDiaryMapper diaryMapper;
     private final AgentMemoryMapper agentMemoryMapper;
     private final AgentMemorySettingsMapper agentMemorySettingsMapper;
@@ -320,6 +324,9 @@ public class ChatServiceImpl implements ChatService {
 
     @Override
     public SseEmitter streamChat(ChatStreamRequest request, Long userId, Long lastEventId) {
+        if (request == null) {
+            throw new BusinessException("400", "对话请求不能为空");
+        }
         Long sessionId = SessionIdParser.parse(request == null ? null : request.getSessionId());
         ConsultationSession session = sessionMapper.selectById(sessionId);
         if (session == null) {
@@ -338,27 +345,80 @@ public class ChatServiceImpl implements ChatService {
         }
         final String turnRequestId = requestId;
         String userMessage = request.getUserMessage() == null ? "" : request.getUserMessage();
+        if (userMessage.isBlank()) {
+            throw new BusinessException("400", "对话内容不能为空");
+        }
         String requestHash = sha256(userMessage);
-        ChatTurnStore.TurnStart turnStart = chatTurnStore.beginTurn(sessionId, userId, turnRequestId,
-                requestHash, userMessage);
+        ConsultationChatTurn existingTurn = chatTurnStore.findTurn(sessionId, turnRequestId);
+        if (existingTurn != null && !requestHash.equals(existingTurn.getRequestHash())) {
+            throw new BusinessException("409", "clientRequestId 已用于不同消息");
+        }
+        if (userMessage.codePointCount(0, userMessage.length())
+                > chatContextSummaryProperties.getMaxSingleMessageChars()) {
+            chatTurnStore.markContextUnavailable(sessionId, userId, turnRequestId, requestHash,
+                    userMessage, false);
+            throw new BusinessException("400", "单条对话内容超过长度上限，请缩短后重试");
+        }
+        if (existingTurn != null && "CONTEXT_REJECTED".equals(existingTurn.getStatus())) {
+            throw new ChatContextPreparationException("CONTEXT_WINDOW_TOO_LARGE",
+                    "近期对话内容超过安全处理上限，请新建会话后继续", turnRequestId, false, 0L);
+        }
+        if (existingTurn != null && "CONTEXT_SUPERSEDED".equals(existingTurn.getStatus())) {
+            throw new ChatContextPreparationException("CONTEXT_REQUEST_SUPERSEDED",
+                    "该请求已被后续对话替代，请从最近一条消息继续", turnRequestId, false, 0L);
+        }
+
+        boolean staleRunningTurn = existingTurn != null && "RUNNING".equals(existingTurn.getStatus())
+                && (existingTurn.getUpdatedAt() == null
+                || !existingTurn.getUpdatedAt().isAfter(LocalDateTime.now().minusMinutes(5)));
+        boolean prepareContext = existingTurn == null || "PENDING".equals(existingTurn.getStatus())
+                || "WAITING_CONTEXT".equals(existingTurn.getStatus())
+                || "CONTEXT_UNAVAILABLE".equals(existingTurn.getStatus()) || staleRunningTurn;
+
+        ChatTurnStore.TurnStart turnStart;
+        ChatContextSnapshot contextSnapshot = null;
+        Map<String, Object> preparedAgentContext = null;
+        if (prepareContext) {
+            preparedAgentContext = new java.util.LinkedHashMap<>(buildAgentContext(userId));
+            ChatContextPreparation preparation = chatContextAssembler.prepare(
+                    sessionId, userId, userMessage, existingTurn != null, preparedAgentContext);
+            if (preparation.status() == ChatContextPreparation.Status.WINDOW_TOO_LARGE) {
+                chatTurnStore.rejectContextTurn(sessionId, userId, turnRequestId, requestHash, userMessage);
+                throw preparation.toException(turnRequestId);
+            }
+            if (preparation.status() == ChatContextPreparation.Status.SUMMARY_PENDING) {
+                chatTurnStore.waitForContext(sessionId, userId, turnRequestId, requestHash,
+                        userMessage, preparation.summaryTargetThroughMessageId());
+                throw preparation.toException(turnRequestId);
+            }
+            if (preparation.status() == ChatContextPreparation.Status.SUMMARY_UNAVAILABLE) {
+                boolean superseded = chatTurnStore.markContextUnavailable(sessionId, userId, turnRequestId,
+                        requestHash, userMessage, true);
+                if (superseded) {
+                    throw new ChatContextPreparationException("CONTEXT_REQUEST_SUPERSEDED",
+                            "该请求已被后续对话替代，请从最近一条消息继续", turnRequestId, false, 0L);
+                }
+                throw preparation.toException(turnRequestId);
+            }
+            contextSnapshot = preparation.toSnapshot();
+            turnStart = chatTurnStore.beginTurn(sessionId, userId, turnRequestId, requestHash,
+                    userMessage, contextSnapshot);
+        } else {
+            // Existing active or terminal turns attach/replay without waiting for summary work.
+            turnStart = chatTurnStore.beginTurn(sessionId, userId, turnRequestId, requestHash, userMessage);
+        }
 
         SseEmitter emitter = new SseEmitter(300000L);
         if (turnStart.shouldGenerate()) {
-            List<ConsultationMessage> history = messageMapper.selectList(
-                    new LambdaQueryWrapper<ConsultationMessage>()
-                            .eq(ConsultationMessage::getSessionId, sessionId)
-                            .orderByAsc(ConsultationMessage::getId));
-            if (!history.isEmpty()) {
-                ConsultationMessage lastMessage = history.get(history.size() - 1);
-                if (Integer.valueOf(1).equals(lastMessage.getSenderType())
-                        && userMessage.equals(lastMessage.getContent())) {
-                    history.remove(history.size() - 1);
-                }
+            if (contextSnapshot == null) {
+                throw new IllegalStateException("New Agent generation has no prepared context snapshot");
             }
+            List<ConsultationMessage> history = contextSnapshot.history();
             AtomicInteger eventSequence = new AtomicInteger(
                     chatTurnStore.nextSequence(sessionId, turnRequestId));
             StringBuilder fullResponse = new StringBuilder();
-            Map<String, Object> agentContext = new java.util.LinkedHashMap<>(buildAgentContext(userId));
+            Map<String, Object> agentContext = preparedAgentContext == null
+                    ? new java.util.LinkedHashMap<>(buildAgentContext(userId)) : preparedAgentContext;
             agentContext.put("sessionId", sessionId.toString());
             agentContext.put("turnId", turnRequestId);
             agentContext.put("turnSequence", turnStart.turnSequence());
@@ -366,7 +426,7 @@ public class ChatServiceImpl implements ChatService {
             agentContext.put("generationToken", turnStart.generationToken());
             agentContext.put("userId", userId.toString());
             Flux<String> response = chatAgent.streamResponse(sessionId, userMessage, history,
-                    agentContext);
+                    contextSnapshot.contextSummary(), agentContext);
             if (response == null) {
                 response = Flux.error(new IllegalStateException("Agent returned an empty stream"));
             }

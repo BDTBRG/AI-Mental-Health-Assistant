@@ -52,3 +52,16 @@ app:
   outbox:
     enabled: ${OUTBOX_ENABLED:true}
     poll-interval-ms: ${OUTBOX_POLL_INTERVAL_MS:2000}
+
+amha:
+  chat:
+    context-summary:
+      preflight-enabled: ${AMHA_CHAT_CONTEXT_SUMMARY_PREFLIGHT_ENABLED:false}
+      worker-enabled: ${AMHA_CHAT_CONTEXT_SUMMARY_WORKER_ENABLED:false}
+      agent-enabled: ${AMHA_CHAT_CONTEXT_SUMMARY_AGENT_ENABLED:false}
+      max-history-messages: ${AMHA_CHAT_CONTEXT_SUMMARY_MAX_HISTORY_MESSAGES:39}
+      recent-messages-to-keep: ${AMHA_CHAT_CONTEXT_SUMMARY_RECENT_MESSAGES_TO_KEEP:12}
+      max-context-chars: ${AMHA_CHAT_CONTEXT_SUMMARY_MAX_CONTEXT_CHARS:32000}
+      max-single-message-chars: ${AMHA_CHAT_CONTEXT_SUMMARY_MAX_SINGLE_MESSAGE_CHARS:8000}
+      max-agent-request-bytes: ${AMHA_CHAT_CONTEXT_SUMMARY_MAX_AGENT_REQUEST_BYTES:65536}
+      retry-after-ms: ${AMHA_CHAT_CONTEXT_SUMMARY_RETRY_AFTER_MS:5000}

@@ -6,12 +6,18 @@ import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Delete;
+import org.apache.ibatis.annotations.Update;
 
 import java.time.LocalDateTime;
 
 @Mapper
 public interface ConsultationContextSummaryOutboxMapper
         extends BaseMapper<ConsultationContextSummaryOutbox> {
+
+    @Select("SELECT * FROM consultation_context_summary_outbox WHERE session_id = #{sessionId} "
+            + "AND user_id = #{userId} LIMIT 1")
+    ConsultationContextSummaryOutbox selectBySessionAndUser(@Param("sessionId") Long sessionId,
+                                                             @Param("userId") Long userId);
 
     @Select("SELECT * FROM consultation_context_summary_outbox WHERE session_id = #{sessionId} "
             + "LIMIT 1 FOR UPDATE")
@@ -34,4 +40,14 @@ public interface ConsultationContextSummaryOutboxMapper
 
     @Delete("DELETE FROM consultation_context_summary_outbox WHERE session_id = #{sessionId}")
     int deleteBySession(@Param("sessionId") Long sessionId);
+
+    @Update("UPDATE consultation_context_summary_outbox SET status = 'PENDING', attempt_count = 0, "
+            + "next_attempt_at = #{retriedAt}, last_error_code = NULL, lease_token = NULL, lease_until = NULL, "
+            + "manual_retry_count = COALESCE(manual_retry_count, 0) + 1, last_manual_retry_by = #{actorUserId}, "
+            + "last_manual_retry_at = #{retriedAt}, updated_at = #{retriedAt} "
+            + "WHERE session_id = #{sessionId} AND user_id = #{userId} AND status = 'DEAD'")
+    int retryDeadForOwner(@Param("sessionId") Long sessionId,
+                          @Param("userId") Long userId,
+                          @Param("actorUserId") Long actorUserId,
+                          @Param("retriedAt") LocalDateTime retriedAt);
 }

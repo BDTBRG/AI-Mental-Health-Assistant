@@ -119,7 +119,7 @@ class EmotionDiaryControllerTest {
                         .header("token", userToken)
                         .param("currentPage", "1")
                         .param("size", "10"))
-                .andExpect(status().isOk())
+                .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.code").value("403"));
 
         Assertions.assertTrue(jdbcTemplate.queryForObject(
