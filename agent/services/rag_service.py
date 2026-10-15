@@ -15,6 +15,11 @@ import logging
 import math
 import re
 import hashlib
+import shutil
+import tempfile
+import threading
+import uuid
+from functools import wraps
 from typing import List, Dict, Optional
 from dataclasses import dataclass
 
@@ -31,6 +36,24 @@ logger = logging.getLogger(__name__)
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 INDEX_PATH = os.path.join(DATA_DIR, "faiss.index")
 META_PATH = os.path.join(DATA_DIR, "chunks_meta.json")
+BUNDLES_DIR = os.path.join(DATA_DIR, "faiss_bundles")
+CURRENT_POINTER_PATH = os.path.join(DATA_DIR, "faiss_current.json")
+SNAPSHOT_SCHEMA_VERSION = 1
+
+
+def _guard_faiss_state(method):
+    """Serialize FAISS reads and writes within this process."""
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        if self.backend != "faiss":
+            return method(self, *args, **kwargs)
+        lock = getattr(self, "_state_lock", None)
+        if lock is None:
+            return method(self, *args, **kwargs)
+        with lock:
+            return method(self, *args, **kwargs)
+
+    return guarded
 
 
 @dataclass
@@ -80,6 +103,7 @@ class RAGService:
         self.model: Optional[SentenceTransformer] = None
         self.index: Optional[faiss.Index] = None
         self.chunks: List[TextChunk] = []
+        self._state_lock = threading.RLock()
         self._next_chunk_id = 0
         self.index_version = "unbuilt"
         self._qdrant_collection_name: Optional[str] = None
@@ -108,7 +132,13 @@ class RAGService:
 
     # ========== 文本分块 ==========
 
-    def _split_text(self, text: str, article_id: int, article_title: str) -> List[TextChunk]:
+    def _split_text(
+        self,
+        text: str,
+        article_id: int,
+        article_title: str,
+        start_chunk_id: Optional[int] = None,
+    ) -> List[TextChunk]:
         """
         滑动窗口分块。
         窗口大小 512 字符，步长 = 512 - 128 = 384 字符（即重叠 128）。
@@ -118,12 +148,14 @@ class RAGService:
         if text_len == 0:
             return chunks
 
+        update_service_counter = start_chunk_id is None
+        next_chunk_id = self._next_chunk_id if update_service_counter else int(start_chunk_id)
         start = 0
         while start < text_len:
             end = min(start + self.CHUNK_SIZE, text_len)
             chunk_text = text[start:end]
             chunk = TextChunk(
-                chunk_id=self._next_chunk_id,
+                chunk_id=next_chunk_id,
                 article_id=article_id,
                 article_title=article_title,
                 content=chunk_text,
@@ -131,17 +163,20 @@ class RAGService:
                 char_end=end,
             )
             chunks.append(chunk)
-            self._next_chunk_id += 1
+            next_chunk_id += 1
 
             if end >= text_len:
                 break
             # 步长 = CHUNK_SIZE - CHUNK_OVERLAP
             start += (self.CHUNK_SIZE - self.CHUNK_OVERLAP)
 
+        if update_service_counter:
+            self._next_chunk_id = next_chunk_id
         return chunks
 
     # ========== 索引构建 ==========
 
+    @_guard_faiss_state
     def rebuild_index(self, articles: List[Dict]) -> int:
         """
         全量重建 FAISS 索引。
@@ -153,14 +188,16 @@ class RAGService:
 
         # 1. 分块
         all_chunks: List[TextChunk] = []
-        self._next_chunk_id = 0
+        next_chunk_id = 0
         for article in articles:
             chunks = self._split_text(
                 text=article.get("content", ""),
                 article_id=article.get("id", 0),
                 article_title=article.get("title", ""),
+                start_chunk_id=next_chunk_id,
             )
             all_chunks.extend(chunks)
+            next_chunk_id += len(chunks)
 
         logger.info(f"分块完成：{len(articles)} 篇文章 → {len(all_chunks)} 个文本块")
 
@@ -191,12 +228,15 @@ class RAGService:
 
         if not all_chunks:
             logger.warning("没有可索引的内容，创建空索引")
+            dimension = getattr(self.model, "get_sentence_embedding_dimension", None)
+            vector_size = int(dimension()) if callable(dimension) else 384
+            candidate_index = faiss.IndexIDMap(faiss.IndexFlatIP(vector_size))
+            candidate_version = self._compute_index_version([])
+            self._save_state(candidate_index, [], candidate_version, 0)
+            self.index = candidate_index
             self.chunks = []
-            self.index = None
-            self.index_version = self._compute_index_version()
-            if os.path.exists(INDEX_PATH):
-                os.remove(INDEX_PATH)
-            self._save()
+            self._next_chunk_id = 0
+            self.index_version = candidate_version
             return 0
 
         # 2. 向量化
@@ -208,21 +248,25 @@ class RAGService:
         # IndexIDMap 包装 IndexFlatIP，支持自定义 ID 和按 ID 删除
         dim = embeddings.shape[1]  # 384
         base_index = faiss.IndexFlatIP(dim)  # 内积相似度（归一化后等价于余弦相似度）
-        self.index = faiss.IndexIDMap(base_index)
+        candidate_index = faiss.IndexIDMap(base_index)
 
         chunk_ids = np.array([c.chunk_id for c in all_chunks], dtype='int64')
-        self.index.add_with_ids(embeddings, chunk_ids)
+        candidate_index.add_with_ids(embeddings, chunk_ids)
+        candidate_version = self._compute_index_version(all_chunks)
+
+        # 4. Publish first, then make the new snapshot visible in memory.
+        self._save_state(candidate_index, all_chunks, candidate_version, next_chunk_id)
+        self.index = candidate_index
         self.chunks = all_chunks
-        self.index_version = self._compute_index_version()
+        self._next_chunk_id = next_chunk_id
+        self.index_version = candidate_version
 
-        # 4. 持久化到磁盘
-        self._save()
-
-        logger.info(f"索引构建完成：{self.index.ntotal} 个向量, 维度 {dim}")
-        return self.index.ntotal
+        logger.info(f"索引构建完成：{candidate_index.ntotal} 个向量, 维度 {dim}")
+        return candidate_index.ntotal
 
     # ========== 增量操作 ==========
 
+    @_guard_faiss_state
     def add_article(self, article_id: int, title: str, content: str):
         """新增单篇文章到索引"""
         if self.backend == "qdrant":
@@ -233,7 +277,12 @@ class RAGService:
             return
 
         self._ensure_model()
-        chunks = self._split_text(content, article_id, title)
+        chunks = self._split_text(
+            content,
+            article_id,
+            title,
+            start_chunk_id=self._next_chunk_id,
+        )
         if not chunks:
             return
 
@@ -242,12 +291,29 @@ class RAGService:
         embeddings = np.array(embeddings).astype('float32')
         chunk_ids = np.array([c.chunk_id for c in chunks], dtype='int64')
 
-        self.index.add_with_ids(embeddings, chunk_ids)
-        self.chunks.extend(chunks)
-        self.index_version = self._compute_index_version()
-        self._save()
-        logger.info(f"文章 {article_id} 添加完成：+{len(chunks)} 块，索引总量 {self.index.ntotal}")
+        candidate_index = faiss.clone_index(self.index)
+        candidate_index.add_with_ids(embeddings, chunk_ids)
+        candidate_chunks = [*self.chunks, *chunks]
+        candidate_next_chunk_id = self._next_chunk_id + len(chunks)
+        candidate_version = self._compute_index_version(candidate_chunks)
+        self._save_state(
+            candidate_index,
+            candidate_chunks,
+            candidate_version,
+            candidate_next_chunk_id,
+        )
+        self.index = candidate_index
+        self.chunks = candidate_chunks
+        self._next_chunk_id = candidate_next_chunk_id
+        self.index_version = candidate_version
+        logger.info(
+            "文章 %s 添加完成：+%s 块，索引总量 %s",
+            article_id,
+            len(chunks),
+            candidate_index.ntotal,
+        )
 
+    @_guard_faiss_state
     def remove_article(self, article_id: int):
         """按文章 ID 删除所有相关分块"""
         if self.backend == "qdrant":
@@ -282,13 +348,52 @@ class RAGService:
         self.index_version = candidate_version
         logger.info(f"文章 {article_id} 删除完成：-{len(ids_to_remove)} 块，索引总量 {self.index.ntotal}")
 
+    @_guard_faiss_state
     def update_article(self, article_id: int, title: str, content: str):
-        """更新文章：先删旧块，再加新块"""
+        """Replace one article in a single persisted snapshot."""
         if self.backend == "qdrant":
             self._sync_qdrant_article(article_id, title, content)
             return
-        self.remove_article(article_id)
-        self.add_article(article_id, title, content)
+        if self.index is None:
+            self.rebuild_index([{"id": article_id, "title": title, "content": content}])
+            return
+
+        self._ensure_model()
+        removed_ids = [chunk.chunk_id for chunk in self.chunks if chunk.article_id == article_id]
+        candidate_index = faiss.clone_index(self.index)
+        if removed_ids:
+            candidate_index.remove_ids(np.array(removed_ids, dtype="int64"))
+
+        new_chunks = self._split_text(
+            content or "",
+            article_id,
+            title or "",
+            start_chunk_id=self._next_chunk_id,
+        )
+        if new_chunks:
+            embeddings = self.model.encode(
+                [chunk.content for chunk in new_chunks],
+                normalize_embeddings=True,
+            )
+            embeddings = np.array(embeddings).astype("float32")
+            chunk_ids = np.array([chunk.chunk_id for chunk in new_chunks], dtype="int64")
+            candidate_index.add_with_ids(embeddings, chunk_ids)
+
+        candidate_chunks = [
+            chunk for chunk in self.chunks if chunk.article_id != article_id
+        ] + new_chunks
+        candidate_next_chunk_id = self._next_chunk_id + len(new_chunks)
+        candidate_version = self._compute_index_version(candidate_chunks)
+        self._save_state(
+            candidate_index,
+            candidate_chunks,
+            candidate_version,
+            candidate_next_chunk_id,
+        )
+        self.index = candidate_index
+        self.chunks = candidate_chunks
+        self._next_chunk_id = candidate_next_chunk_id
+        self.index_version = candidate_version
 
     @staticmethod
     def _chunk_record(chunk: TextChunk) -> Dict:
@@ -399,6 +504,7 @@ class RAGService:
             scores[chunk_id] = min(1.0, matched_weight / total_weight)
         return scores
 
+    @_guard_faiss_state
     def search(self, query: str, top_k: int = DEFAULT_TOP_K) -> List[Dict]:
         """
         混合检索与轻量重排：FAISS 召回候选，再融合稠密相似度和 IDF 词项覆盖率。
@@ -519,33 +625,158 @@ class RAGService:
 
     # ========== 持久化 ==========
 
-    def _save(self):
-        """保存索引到磁盘"""
-        self._save_state(self.index, self.chunks, self.index_version, self._next_chunk_id)
+    @staticmethod
+    def _write_json_file(path: str, value: Dict):
+        with open(path, "w", encoding="utf-8") as file:
+            json.dump(value, file, ensure_ascii=False, indent=2)
+            file.flush()
+            os.fsync(file.fileno())
+
+    @staticmethod
+    def _file_sha256(path: str) -> str:
+        digest = hashlib.sha256()
+        with open(path, "rb") as file:
+            for block in iter(lambda: file.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _chunks_from_metadata(data: Dict) -> List[TextChunk]:
+        return [
+            TextChunk(
+                chunk_id=int(item["chunk_id"]),
+                article_id=int(item["article_id"]),
+                article_title=str(item["article_title"]),
+                content=str(item["content"]),
+                char_start=int(item["char_start"]),
+                char_end=int(item["char_end"]),
+            )
+            for item in data["chunks"]
+        ]
+
+    def _validate_index_snapshot(
+        self,
+        index,
+        chunks: List[TextChunk],
+        index_version: str,
+        next_chunk_id: int,
+    ):
+        if int(index.ntotal) != len(chunks):
+            raise ValueError("FAISS 向量数与分块元数据数量不一致")
+
+        chunk_ids = [int(chunk.chunk_id) for chunk in chunks]
+        if len(set(chunk_ids)) != len(chunk_ids):
+            raise ValueError("分块元数据包含重复的 chunk ID")
+        if any(chunk_id < 0 for chunk_id in chunk_ids):
+            raise ValueError("分块元数据包含无效的负 chunk ID")
+        index_ids = faiss.vector_to_array(index.id_map)
+        if hasattr(index_ids, "tolist"):
+            index_ids = index_ids.tolist()
+        index_ids = [int(chunk_id) for chunk_id in index_ids]
+        if len(index_ids) != len(chunk_ids) or set(index_ids) != set(chunk_ids):
+            raise ValueError("FAISS 向量 ID 与分块元数据映射不一致")
+
+        calculated_version = self._compute_index_version(chunks)
+        if index_version != calculated_version:
+            raise ValueError("索引版本与分块元数据内容不一致")
+        if next_chunk_id < 0 or (chunk_ids and next_chunk_id <= max(chunk_ids)):
+            raise ValueError("下一个 chunk ID 与当前分块元数据不一致")
+
+    def _current_snapshot_paths(self):
+        if os.path.exists(CURRENT_POINTER_PATH):
+            with open(CURRENT_POINTER_PATH, "r", encoding="utf-8") as file:
+                pointer = json.load(file)
+            generation = pointer.get("generation", "")
+            pointer_version = pointer.get("index_version")
+            if (pointer.get("schema_version") != SNAPSHOT_SCHEMA_VERSION
+                    or not re.fullmatch(r"[0-9a-f]{32}", str(generation))
+                    or not isinstance(pointer_version, str)
+                    or not pointer_version):
+                raise ValueError("FAISS 当前快照指针格式无效")
+            bundle_dir = os.path.join(BUNDLES_DIR, generation)
+            index_path = os.path.join(bundle_dir, "faiss.index")
+            meta_path = os.path.join(bundle_dir, "chunks_meta.json")
+            if (self._file_sha256(index_path) != pointer.get("index_sha256")
+                    or self._file_sha256(meta_path) != pointer.get("metadata_sha256")):
+                raise ValueError("FAISS 当前快照校验和不匹配")
+            return index_path, meta_path, pointer_version
+
+        # Preserve read compatibility for installations created before bundles
+        # were introduced. The next successful write publishes a versioned bundle.
+        if os.path.exists(INDEX_PATH) and os.path.exists(META_PATH):
+            return INDEX_PATH, META_PATH, None
+        return None
 
     def _save_state(self, index, chunks: List[TextChunk], index_version: str, next_chunk_id: int):
-        """Persist an explicit snapshot without changing the currently published state."""
-        if index is not None:
-            faiss.write_index(index, INDEX_PATH)
-            logger.info(f"FAISS 索引已保存: {INDEX_PATH} ({index.ntotal} 条)")
+        """Publish an immutable, validated FAISS bundle through one atomic pointer."""
+        if index is None:
+            raise ValueError("不能发布缺少 FAISS 索引的快照")
+        self._validate_index_snapshot(index, chunks, index_version, next_chunk_id)
 
-        # 保存分块元数据
-        meta = [{
-            "chunk_id": c.chunk_id,
-            "article_id": c.article_id,
-            "article_title": c.article_title,
-            "content": c.content,
-            "char_start": c.char_start,
-            "char_end": c.char_end,
-        } for c in chunks]
-        with open(META_PATH, "w", encoding="utf-8") as f:
-            json.dump({
-                "next_chunk_id": next_chunk_id,
+        os.makedirs(BUNDLES_DIR, exist_ok=True)
+        generation = uuid.uuid4().hex
+        staging_dir = tempfile.mkdtemp(prefix=".pending-", dir=BUNDLES_DIR)
+        bundle_dir = os.path.join(BUNDLES_DIR, generation)
+        pointer_temp = os.path.join(DATA_DIR, ".faiss-current-{}.tmp".format(generation))
+        index_path = os.path.join(staging_dir, "faiss.index")
+        meta_path = os.path.join(staging_dir, "chunks_meta.json")
+        metadata = {
+            "next_chunk_id": next_chunk_id,
+            "index_version": index_version,
+            "chunks": [{
+                "chunk_id": chunk.chunk_id,
+                "article_id": chunk.article_id,
+                "article_title": chunk.article_title,
+                "content": chunk.content,
+                "char_start": chunk.char_start,
+                "char_end": chunk.char_end,
+            } for chunk in chunks],
+        }
+
+        try:
+            faiss.write_index(index, index_path)
+            with open(index_path, "rb+") as file:
+                os.fsync(file.fileno())
+            self._write_json_file(meta_path, metadata)
+
+            # Read the staged files back before they can become current.
+            staged_index = faiss.read_index(index_path)
+            with open(meta_path, "r", encoding="utf-8") as file:
+                staged_metadata = json.load(file)
+            staged_chunks = self._chunks_from_metadata(staged_metadata)
+            self._validate_index_snapshot(
+                staged_index,
+                staged_chunks,
+                str(staged_metadata.get("index_version", "")),
+                int(staged_metadata.get("next_chunk_id", -1)),
+            )
+
+            os.replace(staging_dir, bundle_dir)
+            pointer = {
+                "schema_version": SNAPSHOT_SCHEMA_VERSION,
+                "generation": generation,
                 "index_version": index_version,
-                "chunks": meta,
-            }, f, ensure_ascii=False, indent=2)
-        logger.info(f"元数据已保存: {META_PATH} ({len(meta)} 条)")
+                "index_sha256": self._file_sha256(os.path.join(bundle_dir, "faiss.index")),
+                "metadata_sha256": self._file_sha256(
+                    os.path.join(bundle_dir, "chunks_meta.json")
+                ),
+            }
+            self._write_json_file(pointer_temp, pointer)
+            os.replace(pointer_temp, CURRENT_POINTER_PATH)
+            logger.info(
+                "FAISS 快照已发布: generation=%s, chunks=%s",
+                generation,
+                len(chunks),
+            )
+        except Exception:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            try:
+                os.remove(pointer_temp)
+            except FileNotFoundError:
+                pass
+            raise
 
+    @_guard_faiss_state
     def load(self) -> bool:
         """加载配置的索引后端。成功返回 True，空索引或无文件返回 False。"""
         if self.backend == "qdrant":
@@ -557,41 +788,53 @@ class RAGService:
             )
             return int(metadata["total_chunks"]) > 0
 
-        if not os.path.exists(INDEX_PATH) or not os.path.exists(META_PATH):
+        try:
+            snapshot_paths = self._current_snapshot_paths()
+        except Exception as e:
+            logger.error("加载 FAISS 快照失败: %s", e)
+            self.index = None
+            self.chunks = []
+            self._next_chunk_id = 0
+            self.index_version = "unbuilt"
+            return False
+        if snapshot_paths is None:
             logger.info("未找到持久化索引文件，将从空索引开始")
+            self.index = None
+            self.chunks = []
+            self._next_chunk_id = 0
+            self.index_version = "unbuilt"
             return False
 
         try:
+            index_path, meta_path, pointer_version = snapshot_paths
             self._ensure_model()
 
-            # 加载 FAISS 索引
-            self.index = faiss.read_index(INDEX_PATH)
-            logger.info(f"FAISS 索引已加载: {INDEX_PATH} ({self.index.ntotal} 条)")
-
-            # 加载分块元数据
-            with open(META_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            self._next_chunk_id = data.get("next_chunk_id", 0)
-            self.chunks = [
-                TextChunk(
-                    chunk_id=m["chunk_id"],
-                    article_id=m["article_id"],
-                    article_title=m["article_title"],
-                    content=m["content"],
-                    char_start=m["char_start"],
-                    char_end=m["char_end"],
-                )
-                for m in data["chunks"]
-            ]
-            self.index_version = data.get("index_version") or self._compute_index_version()
-            if self.index.ntotal != len(self.chunks):
-                raise ValueError("FAISS 向量数与分块元数据数量不一致")
-            logger.info(f"元数据已加载: {META_PATH} ({len(self.chunks)} 条)")
-            return True
+            loaded_index = faiss.read_index(index_path)
+            with open(meta_path, "r", encoding="utf-8") as file:
+                data = json.load(file)
+            loaded_chunks = self._chunks_from_metadata(data)
+            loaded_version = data.get("index_version") or self._compute_index_version(loaded_chunks)
+            if pointer_version is not None and pointer_version != loaded_version:
+                raise ValueError("快照指针与元数据中的索引版本不一致")
+            next_chunk_id = int(data.get("next_chunk_id", 0))
+            self._validate_index_snapshot(
+                loaded_index,
+                loaded_chunks,
+                loaded_version,
+                next_chunk_id,
+            )
+            self.index = loaded_index
+            self.chunks = loaded_chunks
+            self._next_chunk_id = next_chunk_id
+            self.index_version = loaded_version
+            logger.info("FAISS 快照已加载: %s (%s 条)", index_path, len(loaded_chunks))
+            return bool(loaded_chunks)
         except Exception as e:
-            logger.error(f"加载索引失败: {e}")
+            logger.error("加载 FAISS 快照失败: %s", e)
             self.index = None
             self.chunks = []
+            self._next_chunk_id = 0
+            self.index_version = "unbuilt"
             return False
 
     def refresh_shared_index_state(self) -> Dict:
@@ -622,24 +865,28 @@ class RAGService:
     # ========== 状态查询 ==========
 
     @property
+    @_guard_faiss_state
     def is_ready(self) -> bool:
         if self.backend == "qdrant":
             return bool(self.qdrant_store.get_stats()["ready"])
         return self.index is not None and self.index.ntotal > 0
 
     @property
+    @_guard_faiss_state
     def total_vectors(self) -> int:
         if self.backend == "qdrant":
             return int(self.qdrant_store.get_stats()["total_vectors"])
         return self.index.ntotal if self.index else 0
 
     @property
+    @_guard_faiss_state
     def total_articles(self) -> int:
         if self.backend == "qdrant":
             return int(self.qdrant_store.get_stats()["total_articles"])
         article_ids = set(c.article_id for c in self.chunks)
         return len(article_ids)
 
+    @_guard_faiss_state
     def get_stats(self) -> Dict:
         if self.backend == "qdrant":
             stats = self.qdrant_store.get_stats()
