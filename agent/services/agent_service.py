@@ -3,7 +3,7 @@
 import logging
 import hashlib
 import asyncio
-from typing import Any, AsyncGenerator, Dict, List, Literal, TypedDict
+from typing import Any, AsyncGenerator, Dict, List, Literal, Tuple, TypedDict
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -14,7 +14,13 @@ from prompts.chat_prompt import CHAT_SYSTEM_PROMPT
 from services.safety_service import safety_service
 from services.llm_governance import llm_call_governor
 from services.rag_service import rag_service
-from tools.mental_health_tools import ALL_TOOLS, CURRENT_AGENT_CONTEXT
+from tools.mental_health_tools import (
+    ALL_TOOLS,
+    CURRENT_AGENT_CONTEXT,
+    CURRENT_RETRIEVAL_HITS,
+    CURRENT_RETRIEVED_SOURCES,
+)
+from services.citation_service import review_source_citations
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +32,8 @@ class AgentState(TypedDict):
     pending_safety_clarification: Literal["risk_intent", "safe_location"] | None
     turn_id: str
     agent_context: Dict[str, Any]
+    retrieved_sources: List[Tuple[str, str]]
+    knowledge_retrieved: bool
     tool_rounds: int
     blocked: bool
     final_text: str
@@ -155,7 +163,11 @@ class AgentChatService:
         response = state["messages"][-1]
         tool_map = {tool.name: tool for tool in ALL_TOOLS}
         messages = list(state["messages"])
+        retrieved_sources = list(state.get("retrieved_sources", []))
+        retrieval_hits: List[bool] = []
         context_token = CURRENT_AGENT_CONTEXT.set(state["agent_context"])
+        sources_token = CURRENT_RETRIEVED_SOURCES.set(retrieved_sources)
+        hits_token = CURRENT_RETRIEVAL_HITS.set(retrieval_hits)
         try:
             for call in getattr(response, "tool_calls", None) or []:
                 name = call.get("name", "")
@@ -170,8 +182,16 @@ class AgentChatService:
                         result = "该工具暂时不可用，请基于已知信息谨慎回答。"
                 messages.append(ToolMessage(content=result, tool_call_id=call.get("id", "unknown")))
         finally:
+            CURRENT_RETRIEVAL_HITS.reset(hits_token)
+            CURRENT_RETRIEVED_SOURCES.reset(sources_token)
             CURRENT_AGENT_CONTEXT.reset(context_token)
-        return {"messages": messages}
+        return {
+            "messages": messages,
+            "retrieved_sources": retrieved_sources,
+            "knowledge_retrieved": (
+                state.get("knowledge_retrieved", False) or bool(retrieval_hits)
+            ),
+        }
 
     async def _force_final(self, state: AgentState) -> Dict[str, Any]:
         forced_messages = state["messages"] + [HumanMessage(
@@ -192,9 +212,19 @@ class AgentChatService:
         if blocked:
             logger.warning("Unsafe generated content was replaced by the output safety gate")
             messages = state["messages"][:-1] + [AIMessage(content=safe_response)]
+            return {"messages": messages, "final_text": safe_response}
+
+        reviewed_response, rejected = review_source_citations(
+            safe_response,
+            state.get("retrieved_sources", []),
+            require_citation=state.get("knowledge_retrieved", False),
+        )
+        if rejected:
+            logger.warning("Unverified knowledge citations were replaced")
+            messages = state["messages"][:-1] + [AIMessage(content=reviewed_response)]
         else:
             messages = state["messages"]
-        return {"messages": messages, "final_text": safe_response}
+        return {"messages": messages, "final_text": reviewed_response}
 
     @staticmethod
     def _route_after_agent(state: AgentState) -> str:
@@ -222,7 +252,36 @@ class AgentChatService:
         snapshot = await self.graph.aget_state(run_config)
         if (snapshot.values.get("turn_id") == turn_id
                 and snapshot.values.get("final_text")):
-            final_text = snapshot.values["final_text"]
+            if snapshot.values.get("blocked"):
+                # Rebuild deterministic safety replies using current deployment
+                # resources rather than replaying possibly stale checkpoint text.
+                refreshed_safety_state = self._safety_gate(snapshot.values)
+                final_text = str(
+                    refreshed_safety_state.get("final_text")
+                    or safety_service.uncertain_response()
+                )
+            else:
+                cached_text = str(snapshot.values["final_text"])
+                safe_cached_text, output_blocked = safety_service.review_response(cached_text)
+                if output_blocked:
+                    final_text = safe_cached_text
+                elif ("retrieved_sources" not in snapshot.values
+                      or "knowledge_retrieved" not in snapshot.values):
+                    # Older checkpoints do not carry source provenance. Do not replay
+                    # an answer whose retrieval basis can no longer be checked.
+                    final_text, rejected = review_source_citations(
+                        safe_cached_text, [], require_citation=True
+                    )
+                    if rejected:
+                        logger.warning("Cached Agent output had no citation provenance")
+                else:
+                    final_text, rejected = review_source_citations(
+                        safe_cached_text,
+                        snapshot.values.get("retrieved_sources", []),
+                        require_citation=snapshot.values.get("knowledge_retrieved", False),
+                    )
+                    if rejected:
+                        logger.warning("Unverified cached knowledge citations were replaced")
         else:
             initial = self._build_messages(messages)
             pending_safety_clarification = (
@@ -237,6 +296,8 @@ class AgentChatService:
                 "pending_safety_clarification": pending_safety_clarification,
                 "turn_id": turn_id,
                 "agent_context": context,
+                "retrieved_sources": [],
+                "knowledge_retrieved": False,
                 "tool_rounds": 0,
                 "blocked": False,
                 "final_text": "",

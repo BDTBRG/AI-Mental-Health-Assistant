@@ -9,13 +9,19 @@ from collections import Counter
 from contextvars import ContextVar
 from datetime import date, timedelta
 from langchain_core.tools import tool
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from services.rag_service import rag_service
 from services.safety_service import safety_service
 
 logger = logging.getLogger(__name__)
 CURRENT_AGENT_CONTEXT: ContextVar[Optional[dict]] = ContextVar("agent_context", default=None)
+CURRENT_RETRIEVED_SOURCES: ContextVar[Optional[List[Tuple[str, str]]]] = ContextVar(
+    "retrieved_sources", default=None
+)
+CURRENT_RETRIEVAL_HITS: ContextVar[Optional[List[bool]]] = ContextVar(
+    "retrieval_hits", default=None
+)
 
 # ──────────────────────────────────────────────────────────────
 # 工具 1：知识库语义检索  (已升级为真实 FAISS 检索)
@@ -25,16 +31,30 @@ def search_knowledge_base(query: str) -> str:
     """搜索心理健康知识库，获取与用户问题相关的心理学科普内容。
     适用于：用户询问心理学概念、症状、治疗方法、应对技巧等。
     参数 query: 用户的自然语言查询，如「如何缓解焦虑」"""
-    # 真实 FAISS 语义检索：Sentence-Transformers 向量化 → FAISS Top-3
+    # 共享 RAG 后端返回的结构化命中元数据。仅以这部分数据建立本轮引用白名单；
+    # 正文片段是不可信输入，不能从中解析引用标识。
     results = rag_service.search(query, top_k=3)
     if not results:
         return "未在知识库中找到与「{}」直接相关的内容，请用更具体的心理学术语重试。".format(query)
-    return "\n\n---\n".join(
+    tool_output = "\n\n---\n".join(
         "[引用: article_id={}, chunk_id={}, 标题: {}] {}\n(相关度: {})".format(
             r.get("articleId", "?"), r.get("chunkId", "?"),
             r["title"], r["snippet"], r["score"]
         ) for r in results
     )
+
+    # Record only after the tool has built a response it can return to the model.
+    retrieved_sources = CURRENT_RETRIEVED_SOURCES.get()
+    retrieval_hits = CURRENT_RETRIEVAL_HITS.get()
+    if retrieval_hits is not None:
+        retrieval_hits.append(True)
+    if retrieved_sources is not None:
+        for result in results:
+            article_id = result.get("articleId")
+            chunk_id = result.get("chunkId")
+            if article_id is not None and chunk_id is not None:
+                retrieved_sources.append((str(article_id), str(chunk_id)))
+    return tool_output
 
 
 # ──────────────────────────────────────────────────────────────
