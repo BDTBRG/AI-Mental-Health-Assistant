@@ -108,6 +108,44 @@ CREATE TABLE IF NOT EXISTS `consultation_chat_turn` (
     CONSTRAINT `uk_chat_turn_request` UNIQUE (`session_id`, `client_request_id`)
 );
 
+CREATE TABLE IF NOT EXISTS `consultation_context_summary` (
+    `session_id` BIGINT NOT NULL,
+    `user_id` BIGINT NOT NULL,
+    `summary_json` CLOB NOT NULL,
+    `covered_through_message_id` BIGINT NOT NULL,
+    `summary_version` BIGINT NOT NULL,
+    `prompt_version` VARCHAR(64) NOT NULL,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`session_id`)
+);
+CREATE INDEX IF NOT EXISTS `idx_context_summary_user`
+    ON `consultation_context_summary` (`user_id`, `session_id`);
+
+CREATE TABLE IF NOT EXISTS `consultation_context_summary_outbox` (
+    `id` BIGINT NOT NULL AUTO_INCREMENT,
+    `session_id` BIGINT NOT NULL,
+    `user_id` BIGINT NOT NULL,
+    `desired_through_message_id` BIGINT NOT NULL,
+    `status` VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+    `attempt_count` INT NOT NULL DEFAULT 0,
+    `next_attempt_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `lease_token` CHAR(36) DEFAULT NULL,
+    `lease_until` TIMESTAMP DEFAULT NULL,
+    `last_error_code` VARCHAR(64) DEFAULT NULL,
+    `manual_retry_count` INT NOT NULL DEFAULT 0,
+    `last_manual_retry_by` BIGINT DEFAULT NULL,
+    `last_manual_retry_at` TIMESTAMP DEFAULT NULL,
+    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    CONSTRAINT `uk_context_summary_outbox_session` UNIQUE (`session_id`)
+);
+CREATE INDEX IF NOT EXISTS `idx_context_summary_outbox_ready`
+    ON `consultation_context_summary_outbox` (`status`, `next_attempt_at`, `lease_until`);
+CREATE INDEX IF NOT EXISTS `idx_context_summary_outbox_user`
+    ON `consultation_context_summary_outbox` (`user_id`, `session_id`);
+
 CREATE TABLE IF NOT EXISTS `consultation_stream_event` (
     `id` BIGINT NOT NULL AUTO_INCREMENT,
     `session_id` BIGINT NOT NULL,

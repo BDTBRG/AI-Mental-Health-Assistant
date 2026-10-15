@@ -17,6 +17,13 @@ import org.mockito.ArgumentCaptor;
 import com.amha.service.impl.EmotionAnalysisOutboxService;
 import com.amha.service.impl.ChatTurnStore;
 import com.amha.service.impl.KnowledgeIndexOutboxService;
+import com.amha.service.impl.ContextSummaryOutboxService;
+import com.amha.entity.ConsultationContextSummary;
+import com.amha.entity.ConsultationContextSummaryOutbox;
+import com.amha.entity.ConsultationMessage;
+import com.amha.mapper.ConsultationContextSummaryMapper;
+import com.amha.mapper.ConsultationContextSummaryOutboxMapper;
+import com.amha.mapper.ConsultationMessageMapper;
 
 import java.util.Map;
 import java.nio.charset.StandardCharsets;
@@ -34,6 +41,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.never;
@@ -57,6 +65,15 @@ class ChatControllerTest {
     private JdbcTemplate jdbcTemplate;
 
     @Autowired
+    private ConsultationContextSummaryMapper contextSummaryMapper;
+
+    @Autowired
+    private ConsultationContextSummaryOutboxMapper contextSummaryOutboxMapper;
+
+    @Autowired
+    private ConsultationMessageMapper consultationMessageMapper;
+
+    @Autowired
     private EmotionAnalysisOutboxService outboxService;
 
     @Autowired
@@ -64,6 +81,9 @@ class ChatControllerTest {
 
     @Autowired
     private KnowledgeIndexOutboxService knowledgeIndexOutboxService;
+
+    @MockBean
+    private ContextSummaryOutboxService contextSummaryOutboxService;
 
     @Autowired
     private com.amha.service.impl.AgentCheckpointPurgeOutboxService checkpointPurgeOutboxService;
@@ -313,6 +333,80 @@ class ChatControllerTest {
     }
 
     @Test
+    @Order(100)
+    @DisplayName("摘要任务重放仅管理员可执行且不返回摘要正文")
+    void onlyAdminCanRetryDeadContextSummaryWithoutReturningSummaryContent() throws Exception {
+        when(contextSummaryOutboxService.retryDead(eq(sessionId), anyLong())).thenReturn(true);
+        String adminResponse = mockMvc.perform(post("/api/admin/context-summary/" + sessionId + "/retry")
+                        .header("token", adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("200"))
+                .andExpect(jsonPath("$.data.retried").value(true))
+                .andReturn().getResponse().getContentAsString();
+
+        org.junit.jupiter.api.Assertions.assertFalse(adminResponse.contains("summary_json"));
+        org.junit.jupiter.api.Assertions.assertFalse(adminResponse.contains("sourceMessageIds"));
+        verify(contextSummaryOutboxService).retryDead(eq(sessionId), anyLong());
+
+        mockMvc.perform(post("/api/admin/context-summary/" + sessionId + "/retry")
+                        .header("token", userToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("403"));
+        verify(contextSummaryOutboxService, times(1)).retryDead(eq(sessionId), anyLong());
+    }
+
+    @Test
+    @Order(101)
+    @DisplayName("摘要迁移表支持水位读取、CAS 更新和待处理任务领取查询")
+    void contextSummaryMappersExecuteAgainstIsolatedH2Schema() {
+        long testSessionId = Math.abs(System.nanoTime());
+        long testUserId = testSessionId + 1;
+        try {
+            ConsultationMessage first = new ConsultationMessage();
+            first.setSessionId(testSessionId);
+            first.setSenderType(1);
+            first.setContent("earlier");
+            consultationMessageMapper.insert(first);
+
+            ConsultationMessage second = new ConsultationMessage();
+            second.setSessionId(testSessionId);
+            second.setSenderType(2);
+            second.setContent("summarize this");
+            consultationMessageMapper.insert(second);
+
+            ConsultationContextSummary summary = new ConsultationContextSummary();
+            summary.setSessionId(testSessionId);
+            summary.setUserId(testUserId);
+            summary.setSummaryJson("{}");
+            summary.setCoveredThroughMessageId(first.getId());
+            summary.setSummaryVersion(1L);
+            summary.setPromptVersion("context-summary-v1");
+            contextSummaryMapper.insert(summary);
+
+            ConsultationContextSummaryOutbox task = new ConsultationContextSummaryOutbox();
+            task.setSessionId(testSessionId);
+            task.setUserId(testUserId);
+            task.setDesiredThroughMessageId(second.getId());
+            task.setStatus("PENDING");
+            task.setAttemptCount(0);
+            task.setNextAttemptAt(java.time.LocalDateTime.now().minusSeconds(1));
+            contextSummaryOutboxMapper.insert(task);
+
+            Assertions.assertEquals(task.getId(), contextSummaryOutboxMapper.selectNextReadyForUpdate().getId());
+            Assertions.assertEquals(1, contextSummaryMapper.updateSummaryCas(testSessionId, testUserId, 1L,
+                    "{\"facts\":[]}", second.getId(), "context-summary-v1", java.time.LocalDateTime.now()));
+            Assertions.assertEquals(second.getId(), contextSummaryMapper.selectById(testSessionId)
+                    .getCoveredThroughMessageId());
+            Assertions.assertEquals(second.getId(), consultationMessageMapper.selectWindowAfterWatermark(
+                    testSessionId, first.getId(), second.getId(), 40).get(0).getId());
+        } finally {
+            jdbcTemplate.update("DELETE FROM consultation_context_summary_outbox WHERE session_id = ?", testSessionId);
+            jdbcTemplate.update("DELETE FROM consultation_context_summary WHERE session_id = ?", testSessionId);
+            jdbcTemplate.update("DELETE FROM consultation_message WHERE session_id = ?", testSessionId);
+        }
+    }
+
+    @Test
     @Order(6)
     @DisplayName("人工复核状态机支持领取、完成、并发冲突和授权撤回")
     void reviewStateMachineUsesOptimisticVersionAndAudit() throws Exception {
@@ -510,6 +604,7 @@ class ChatControllerTest {
                         .header("token", userToken))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value("200"));
+        verify(contextSummaryOutboxService).deleteForSession(sessionId);
         Integer remainingTurns = jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM consultation_chat_turn WHERE session_id = ?",
                 Integer.class, sessionId);

@@ -67,6 +67,7 @@ public class ChatServiceImpl implements ChatService {
     private final ConsultationChatTurnMapper chatTurnMapper;
     private final ConsultationStreamEventMapper streamEventMapper;
     private final AgentCheckpointPurgeOutboxService checkpointPurgeOutboxService;
+    private final ContextSummaryOutboxService contextSummaryOutboxService;
     private final ChatTurnStore chatTurnStore;
     private final EmotionDiaryMapper diaryMapper;
     private final AgentMemoryMapper agentMemoryMapper;
@@ -275,6 +276,7 @@ public class ChatServiceImpl implements ChatService {
         if (runningTurns != null && runningTurns > 0) {
             throw new BusinessException("409", "会话仍有回复生成中，请稍后删除");
         }
+        contextSummaryOutboxService.deleteForSession(sessionId);
         streamEventMapper.delete(new LambdaQueryWrapper<ConsultationStreamEvent>()
                 .eq(ConsultationStreamEvent::getSessionId, sessionId));
         checkpointPurgeOutboxService.enqueueSession(sessionId, userId);
