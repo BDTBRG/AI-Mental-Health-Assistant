@@ -84,7 +84,7 @@
 
 摘要结构使用 Pydantic v2，所有模型设 `extra="forbid"`。每个条目是 `{text: str, sourceMessageIds: list[int]}`；每字段最多 8 项、每项最多 240 字符、每项来源最多 5 个 ID、全部文本最多 1,200 字符。输入最多 40 条消息且总内容最多 16,000 字符。来源 ID 必须存在于同会话的当前摘要或本批消息中；服务只做来源归属/水位校验，不把引用存在等同于语义蕴含证明。
 
-- [ ] **Step 1: 先写失败测试。** 在 `agent/tests/test_context_summary_service.py` 添加以下测试，服务 API 固定为 `ContextSummaryService(model).summarize(previous_summary, messages, user_id)`；`messages` 为 `{id, senderType, content}` 列表。
+- [x] **Step 1: 先写失败测试。** 在 `agent/tests/test_context_summary_service.py` 添加以下测试，服务 API 固定为 `ContextSummaryService(model).summarize(previous_summary, messages, user_id)`；`messages` 为 `{id, senderType, content}` 列表。
 
 ```python
 import pytest
@@ -138,19 +138,19 @@ async def test_summary_rejects_unknown_source_and_extra_diagnostic_fields():
         )
 ```
 
-- [ ] **Step 2: 确认测试失败。** 在 `agent/` 执行 `python -m pytest tests/test_context_summary_service.py -q`；预期因新服务模块尚不存在而失败。
-- [ ] **Step 3: 实现最小服务与提示词。** 新建三个严格 schema 字段及来源 ID 校验；摘要内部请求固定为 `{sessionId, previousSummary, messages, promptVersion, correlationId}`，输入消息项为 `{id, senderType, content}`。新增独立摘要提示词，明确消息内容是不可信数据、只能压缩明示信息、无工具/RAG/checkpoint。模型响应只接受 JSON；解析、schema、长度、未知来源 ID 任一失败都抛可分类异常，不回退空摘要。既有摘要里的 source ID 可延续，输出 source ID 只能来自既有摘要或本批次。
-- [ ] **Step 4: 通过服务测试并补边界测试。** 运行同一 pytest 命令；再补测空摘要、已有摘要来源 ID 可被保留、单字段 9 项、文本总长度超限、输入 41 条/16,001 字符、模型超时和非法 JSON，确认每一项都拒绝推进结果。
-- [ ] **Step 5: 提交本阶段。** `git add agent/services/context_summary_service.py agent/prompts/context_summary_prompt.py agent/tests/test_context_summary_service.py`，检查 `git diff --cached --check` 后提交 `feat(agent): add bounded context summarizer`，再快进合入本地 `master`。
+- [x] **Step 2: 确认测试失败。** 在 `agent/` 执行 `python -m pytest tests/test_context_summary_service.py -q`；预期因新服务模块尚不存在而失败。
+- [x] **Step 3: 实现最小服务与提示词。** 新建三个严格 schema 字段及来源 ID 校验；摘要内部请求固定为 `{sessionId, previousSummary, messages, promptVersion, correlationId}`，输入消息项为 `{id, senderType, content}`。新增独立摘要提示词，明确消息内容是不可信数据、只能压缩明示信息、无工具/RAG/checkpoint。模型响应只接受 JSON；解析、schema、长度、未知来源 ID 任一失败都抛可分类异常，不回退空摘要。既有摘要里的 source ID 可延续，输出 source ID 只能来自既有摘要或本批次。
+- [x] **Step 4: 通过服务测试并补边界测试。** 运行同一 pytest 命令；再补测空摘要、已有摘要来源 ID 可被保留、单字段 9 项、文本总长度超限、输入 41 条/16,001 字符、模型超时和非法 JSON，确认每一项都拒绝推进结果。
+- [x] **Step 5: 提交本阶段。** `git add agent/services/context_summary_service.py agent/prompts/context_summary_prompt.py agent/tests/test_context_summary_service.py`，检查 `git diff --cached --check` 后提交 `feat(agent): add bounded context summarizer`，再快进合入本地 `master`。
 
 ## Task 2: Agent 内部接口、预算和调用治理
 
 **目标文件：** `agent/app.py`、`agent/config.py`、`agent/services/agent_service.py`、`agent/services/llm_governance.py`、`agent/tests/test_context_summary_api.py`、`agent/tests/test_llm_governance.py`、`agent/tests/test_checkpoint_context.py`、`agent/.env.example`。
 
-- [ ] **Step 1: 写 API 契约测试。** 新建 `agent/tests/test_context_summary_api.py`，用 `fastapi.testclient.TestClient` 验证无 `X-Agent-Token` 返回 403、有效 token 返回固定 JSON schema（`summary`、`coveredThroughMessageId`、`promptVersion`），来源 ID 既不属于本批消息也不属于输入摘要时返回 422/服务错误，且摘要端点不访问 `agent_chat_service.checkpointer`。该 Agent 内部 API 返回 Pydantic JSON 对象，不包 Spring 的 `Result`；模型用 fake，不连接 DeepSeek。
-- [ ] **Step 2: 验证测试失败。** `cd agent; python -m pytest tests/test_context_summary_api.py -q`；预期新路由未注册而失败。
-- [ ] **Step 3: 实现摘要 API 和请求 schema。** 在 `app.py` 导入 Task 1 的 request/response schema 和服务，新增受 `require_internal_token` 保护的 `POST /api/agent/v2/context-summary`。请求固定字段 `sessionId, userId, previousSummary, messages, promptVersion, correlationId`，最多 40 条、16,000 字符，响应只返回 summary、实际覆盖水位和 prompt 版本；`userId` 仅传给 `LLMCallGovernor` 执行用户额度，不写到摘要或模型标签/日志。聊天 `ChatRequest` 增加独立可选 `contextSummary`；Pydantic 校验最多 39 条历史 + 本轮 1 条、合计原文、当前用户消息与序列化摘要最多 32,000 字符、单条 history/userMessage 最多 8,000 字符；在 FastAPI 请求层同时限制原始 JSON body 为 64 KiB，任何超限都拒绝而不静默截断。
-- [ ] **Step 4: 写 semaphore 等待失败测试。** 在 `agent/tests/test_llm_governance.py` 用 `monkeypatch` 将 `LLM_QUEUE_WAIT_TIMEOUT_SECONDS` 设为 `0.01`，将 governor semaphore 置为 0 个 permit，并断言 `invoke()` 抛 `LLMQueueTimeout`；另一测试让 FakeLLM 抛错后确认 permit 可供下一次调用获取。
+- [x] **Step 1: 写 API 契约测试。** 新建 `agent/tests/test_context_summary_api.py`，用 `fastapi.testclient.TestClient` 验证无 `X-Agent-Token` 返回 403、有效 token 返回固定 JSON schema（`summary`、`coveredThroughMessageId`、`promptVersion`），来源 ID 既不属于本批消息也不属于输入摘要时返回 422/服务错误，且摘要端点不访问 `agent_chat_service.checkpointer`。该 Agent 内部 API 返回 Pydantic JSON 对象，不包 Spring 的 `Result`；模型用 fake，不连接 DeepSeek。
+- [x] **Step 2: 验证测试失败。** `cd agent; python -m pytest tests/test_context_summary_api.py -q`；预期新路由未注册而失败。
+- [x] **Step 3: 实现摘要 API 和请求 schema。** 在 `app.py` 导入 Task 1 的 request/response schema 和服务，新增受 `require_internal_token` 保护的 `POST /api/agent/v2/context-summary`。请求固定字段 `sessionId, userId, previousSummary, messages, promptVersion, correlationId`，最多 40 条、16,000 字符，响应只返回 summary、实际覆盖水位和 prompt 版本；`userId` 仅传给 `LLMCallGovernor` 执行用户额度，不写到摘要或模型标签/日志。聊天 `ChatRequest` 增加独立可选 `contextSummary`；Pydantic 校验最多 39 条历史 + 本轮 1 条、合计原文、当前用户消息与序列化摘要最多 32,000 字符、单条 history/userMessage 最多 8,000 字符；在 FastAPI 请求层同时限制原始 JSON body 为 64 KiB，任何超限都拒绝而不静默截断。
+- [x] **Step 4: 写 semaphore 等待失败测试。** 在 `agent/tests/test_llm_governance.py` 用 `monkeypatch` 将 `LLM_QUEUE_WAIT_TIMEOUT_SECONDS` 设为 `0.01`，将 governor semaphore 置为 0 个 permit，并断言 `invoke()` 抛 `LLMQueueTimeout`；另一测试让 FakeLLM 抛错后确认 permit 可供下一次调用获取。
 
 ```python
 import asyncio
@@ -172,7 +172,7 @@ async def test_invoke_fails_when_queue_wait_budget_expires(monkeypatch):
     with pytest.raises(LLMQueueTimeout):
         await governor.invoke(FakeLLM(), [], "chat-agent")
 ```
-- [ ] **Step 5: 实现有界 semaphore 和配置。** `LLMCallGovernor.invoke` 用带 timeout 的 acquire/finally release 代替无界 `async with semaphore`；新增环境配置默认 `LLM_QUEUE_WAIT_TIMEOUT_SECONDS=5`、`AGENT_TURN_TIMEOUT_SECONDS=240`、摘要并发上限 1。获取 permit 的流程按以下结构实现，保证 acquire 超时不释放未持有的 permit，模型成功、异常或取消都在 `finally` 释放：
+- [x] **Step 5: 实现有界 semaphore 和配置。** `LLMCallGovernor.invoke` 用带 timeout 的 acquire/finally release 代替无界 `async with semaphore`；新增环境配置默认 `LLM_QUEUE_WAIT_TIMEOUT_SECONDS=5`、`AGENT_TURN_TIMEOUT_SECONDS=240`、摘要并发上限 1。获取 permit 的流程按以下结构实现，保证 acquire 超时不释放未持有的 permit，模型成功、异常或取消都在 `finally` 释放：
 
 ```python
 try:
@@ -192,10 +192,10 @@ finally:
 ```
 
 摘要 stage 使用独立低并发预算并仍受全局最大并发约束；排队超时、模型超时和熔断使用不同错误类型。
-- [ ] **Step 6: 写摘要不进入 checkpoint 的失败测试。** 在 `agent/tests/test_checkpoint_context.py` 加用例：构造 `AgentRequestContext(values={"contextSummary": ...})`，断言传给 FakeGovernor 的模型消息包含明确标记的摘要，图 state `messages`、保存给 checkpointer 的 checkpoint input 和下一次 raw history 均不含摘要正文。
-- [ ] **Step 7: 实现 ephemeral 模型输入与整轮 deadline。** 修改 `AgentChatService.stream_chat`/`_resolve_final_text`，摘要只在 `_call_model` 和 `_force_final` 的模型请求消息中临时注入；安全 gate 继续只用本轮用户消息和最近 raw history。用 `asyncio.wait_for` 包住完整图调用，超时取消本轮，不向 checkpoint 写入成功的部分输出。
-- [ ] **Step 8: 验证 Agent 回归。** 在 `agent/` 执行 `python -m pytest tests/test_context_summary_service.py tests/test_context_summary_api.py tests/test_llm_governance.py tests/test_checkpoint_context.py tests/test_agent_safety_gate.py -q`；预期全部通过，且没有真实模型网络调用。另以配置信号验证 Agent turn 截止 240 秒小于 Spring Agent 响应截止 270 秒，后者小于现有 SSE 300 秒；摘要模型排队 5 秒 + 单次调用 50 秒小于摘要 HTTP 截止 65 秒。
-- [ ] **Step 9: 提交本阶段。** 暂存 Task 2 列出的 Agent 文件，提交 `feat(agent): bound chat context and model waits` 并快进合入本地 `master`。
+- [x] **Step 6: 写摘要不进入 checkpoint 的失败测试。** 在 `agent/tests/test_checkpoint_context.py` 加用例：构造 `AgentRequestContext(values={"contextSummary": ...})`，断言传给 FakeGovernor 的模型消息包含明确标记的摘要，图 state `messages`、保存给 checkpointer 的 checkpoint input 和下一次 raw history 均不含摘要正文。
+- [x] **Step 7: 实现 ephemeral 模型输入与整轮 deadline。** 修改 `AgentChatService.stream_chat`/`_resolve_final_text`，摘要只在 `_call_model` 和 `_force_final` 的模型请求消息中临时注入；安全 gate 继续只用本轮用户消息和最近 raw history。用 `asyncio.wait_for` 包住完整图调用，超时取消本轮，不向 checkpoint 写入成功的部分输出。
+- [x] **Step 8: 验证 Agent 回归。** 在 `agent/` 执行 `python -m pytest tests/test_context_summary_service.py tests/test_context_summary_api.py tests/test_llm_governance.py tests/test_checkpoint_context.py tests/test_agent_safety_gate.py -q`；预期全部通过，且没有真实模型网络调用。另以配置信号验证 Agent turn 截止 240 秒小于 Spring Agent 响应截止 270 秒，后者小于现有 SSE 300 秒；摘要模型排队 5 秒 + 单次调用 50 秒小于摘要 HTTP 截止 65 秒。
+- [x] **Step 9: 提交本阶段。** 暂存 Task 2 列出的 Agent 文件，提交 `feat(agent): bound chat context and model waits` 并快进合入本地 `master`。
 
 ## Task 3: V13 持久化表与摘要 Outbox 服务
 
@@ -203,11 +203,11 @@ finally:
 
 摘要表以 `session_id` 为主键；字段至少包括 `user_id`、JSON `summary_json`、`covered_through_message_id`、`summary_version`、`prompt_version`、`updated_at`。Outbox 表以自增 `id` 为主键并对 `session_id` 建唯一键，每会话复用一条任务行合并 `desired_through_message_id`；任务字段包括 `user_id`、`status`、`attempt_count`、`next_attempt_at`、lease、`last_error_code`、`created_at`、`updated_at`。所有领取操作采用现有 `SELECT ... FOR UPDATE SKIP LOCKED` 模式，业务请求和 Worker 更新同一会话时先锁 `consultation_session` 行，锁顺序一致。Worker 领取时将 `desiredThroughMessageId` 和预期摘要版本复制到内存 claim 快照；新回合增大持久化目标时，旧 claim 只能完成旧水位并将任务重新置为 PENDING，不新增重复保存的 processing 水位列。Redis Stream payload 只放 `{outboxId}`，处理 lease/token 由数据库 claim 生成并用于 CAS 栅栏，不放会话内容、用户 ID 或摘要正文。
 
-- [ ] **Step 1: 写持久化、指标与管理员权限失败测试。** 新建 `ContextSummaryOutboxServiceTest`，Mockito 测试 `enqueue(sessionId,userId,target)` 两次后只有一条会话任务、`desiredThroughMessageId` 单调增加、claim 快照固定本次目标；`loadRequest(claim,40,16000)` 不读取水位外消息且遵守数量/字符限制；模拟 processing lease 过期后只有当前 `leaseToken` 能完成。新建 `ContextSummaryMetricsTest` 验证 pending/dead gauge 与低基数 counter 名称、注册后没有用户/会话标签。在 `ChatControllerTest` 增加管理员可重放 DEAD、普通用户收到拒绝结果且不会读取摘要内容的 RED 用例。Outbox service 公共方法签名固定为 `void enqueue(Long sessionId, Long userId, Long targetThroughMessageId)`、`Long claimNextForDispatch()`（无可派发项返回 `null`）、`ContextSummaryClaim claimForProcessing(Long outboxId)`、`ContextSummaryAgentRequest loadRequest(ContextSummaryClaim claim, int maxMessages, int maxChars)`、`void complete(ContextSummaryClaim claim, ContextSummaryAgentResponse response)`、`void fail(ContextSummaryClaim claim, String errorCode)`、`boolean retryDead(Long sessionId, Long actorUserId)`、`void deleteForSession(Long sessionId)`；`ContextSummaryClaim(Long outboxId, Long sessionId, Long userId, Long targetThroughMessageId, Long expectedSummaryVersion, String processingLeaseToken)` 是不可变快照。
+- [x] **Step 1: 写持久化、指标与管理员权限失败测试。** 新建 `ContextSummaryOutboxServiceTest`，Mockito 测试 `enqueue(sessionId,userId,target)` 两次后只有一条会话任务、`desiredThroughMessageId` 单调增加、claim 快照固定本次目标；`loadRequest(claim,40,16000)` 不读取水位外消息且遵守数量/字符限制；模拟 processing lease 过期后只有当前 `leaseToken` 能完成。新建 `ContextSummaryMetricsTest` 验证 pending/dead gauge 与低基数 counter 名称、注册后没有用户/会话标签。在 `ChatControllerTest` 增加管理员可重放 DEAD、普通用户收到拒绝结果且不会读取摘要内容的 RED 用例。Outbox service 公共方法签名固定为 `void enqueue(Long sessionId, Long userId, Long targetThroughMessageId)`、`Long claimNextForDispatch()`（无可派发项返回 `null`）、`ContextSummaryClaim claimForProcessing(Long outboxId)`、`ContextSummaryAgentRequest loadRequest(ContextSummaryClaim claim, int maxMessages, int maxChars)`、`void complete(ContextSummaryClaim claim, ContextSummaryAgentResponse response)`、`void fail(ContextSummaryClaim claim, String errorCode)`、`boolean retryDead(Long sessionId, Long actorUserId)`、`void deleteForSession(Long sessionId)`；`ContextSummaryClaim(Long outboxId, Long sessionId, Long userId, Long targetThroughMessageId, Long expectedSummaryVersion, String processingLeaseToken)` 是不可变快照。
 
 Outbox 增加 `manual_retry_count`、`last_manual_retry_by`、`last_manual_retry_at` 三个可空/默认字段，使 DEAD 人工重放具备可审计记录；只有管理员接口能写入这些字段，runbook 禁止直接手改状态 SQL。
-- [ ] **Step 2: 确认测试失败。** `mvn -f server/pom.xml -Dtest=ContextSummaryOutboxServiceTest,ChatControllerTest test`；预期因新 service 与 `/api/admin/context-summary/{sessionId}/retry` 路由不存在而失败。
-- [ ] **Step 3: 增加 V13 与 fresh-install schema。** 新 migration 创建 `consultation_context_summary` 和 `consultation_context_summary_outbox`，使用上方定义的列、主键/唯一键/索引；Outbox 状态只使用 `PENDING`、`QUEUED`、`PROCESSING`、`DEAD`，摘要任务失败使用 `attempt_count` 与 `next_attempt_at` 退避。把相同 CREATE TABLE 结构加到 `server/src/main/resources/db/init.sql`，migration 注释写明接续 V12，不作 checkpoint 或历史消息修改。
+- [x] **Step 2: 确认测试失败。** `mvn -f server/pom.xml -Dtest=ContextSummaryOutboxServiceTest,ChatControllerTest test`；预期因新 service 与 `/api/admin/context-summary/{sessionId}/retry` 路由不存在而失败。
+- [x] **Step 3: 增加 V13 与 fresh-install schema。** 新 migration 创建 `consultation_context_summary` 和 `consultation_context_summary_outbox`，使用上方定义的列、主键/唯一键/索引；Outbox 状态只使用 `PENDING`、`QUEUED`、`PROCESSING`、`DEAD`，摘要任务失败使用 `attempt_count` 与 `next_attempt_at` 退避。把相同 CREATE TABLE 结构加到 `server/src/main/resources/db/init.sql`，migration 注释写明接续 V12，不作 checkpoint 或历史消息修改。
 
 两张表的 DDL 按以下结构实现，migration 与 `init.sql` 保持列、类型、默认值和索引一致：
 
@@ -248,21 +248,21 @@ CREATE TABLE consultation_context_summary_outbox (
 );
 ```
 
-- [ ] **Step 4: 添加实体与 Mapper。** Entity 字段以 MyBatis-Plus camelCase 映射；Mapper 添加摘要 `SELECT ... WHERE session_id=? AND user_id=?`、会话行锁、按水位读取最多 N 条消息、摘要 CAS 更新和 Outbox ready/lease 查询。所有 select 使用参数绑定，禁止拼接用户可控 SQL。
-- [ ] **Step 5: 实现事务 Outbox 与受限重放入口。** `enqueue` 在 session row lock 内校验 session owner 并合并水位；Dispatcher 发布仅写 `{outboxId}` 的 Redis record，数据库保留 dispatch lease；消费端按 ID 加锁并 claim，处理快照含目标水位、预期摘要版本和新 processing lease token；最多 8 次退避重试（初始 5 秒指数退避、上限 900 秒），耗尽后标为 `DEAD`。新建 `ContextSummaryAdminController`，映射 `POST /api/admin/context-summary/{sessionId}/retry`，从 `HttpServletRequest.userType` 限定 `2` 管理员；其调用 `retryDead(sessionId, actorUserId)`，事务内只允许 DEAD 改回 PENDING，并原子清零 `attempt_count`、清除旧错误、设置立即可运行时间、递增 `manual_retry_count`、写 `last_manual_retry_by/at`；非 DEAD 返回未执行，不记录二次重放。响应不含摘要正文。水位/版本 CAS 冲突时不得覆盖新摘要，重读并重算；删除会话时同事务删 summary/outbox。
-- [ ] **Step 6: 实现 Spring 指标。** `ContextSummaryMetrics` 注入已有 `MeterRegistry`，注册 `amha.chat.context_summary.outbox.pending`、`.dead`、`.oldest_wait_seconds` gauges，以及摘要 `completed`/`failed`、摘要 duration/输入输出长度 histogram、上下文 `context_pending`/`context_unavailable`/`context_too_large` counters。指标禁止添加 userId、sessionId、原文和摘要标签。
-- [ ] **Step 7: 验证服务与 SQL 变更。** 运行 Task 3 单测；`git diff --check`；检查 V13 文件没有 `DROP`、没有读写 Agent checkpoint 文件路径、没有 DELETE consultation_message。SQL 在隔离测试库验证后记录结果，禁止在本轮对个人本地运行库执行迁移。
-- [ ] **Step 8: 提交本阶段。** 暂存 V13、init.sql、entity、mapper、service、metrics、tests，提交 `feat(server): persist context summary jobs` 并快进合入本地 `master`。
+- [x] **Step 4: 添加实体与 Mapper。** Entity 字段以 MyBatis-Plus camelCase 映射；Mapper 添加摘要 `SELECT ... WHERE session_id=? AND user_id=?`、会话行锁、按水位读取最多 N 条消息、摘要 CAS 更新和 Outbox ready/lease 查询。所有 select 使用参数绑定，禁止拼接用户可控 SQL。
+- [x] **Step 5: 实现事务 Outbox 与受限重放入口。** `enqueue` 在 session row lock 内校验 session owner 并合并水位；Dispatcher 发布仅写 `{outboxId}` 的 Redis record，数据库保留 dispatch lease；消费端按 ID 加锁并 claim，处理快照含目标水位、预期摘要版本和新 processing lease token；最多 8 次退避重试（初始 5 秒指数退避、上限 900 秒），耗尽后标为 `DEAD`。新建 `ContextSummaryAdminController`，映射 `POST /api/admin/context-summary/{sessionId}/retry`，从 `HttpServletRequest.userType` 限定 `2` 管理员；其调用 `retryDead(sessionId, actorUserId)`，事务内只允许 DEAD 改回 PENDING，并原子清零 `attempt_count`、清除旧错误、设置立即可运行时间、递增 `manual_retry_count`、写 `last_manual_retry_by/at`；非 DEAD 返回未执行，不记录二次重放。响应不含摘要正文。水位/版本 CAS 冲突时不得覆盖新摘要，重读并重算；删除会话时同事务删 summary/outbox。
+- [x] **Step 6: 实现 Spring 指标。** `ContextSummaryMetrics` 注入已有 `MeterRegistry`，注册 `amha.chat.context_summary.outbox.pending`、`.dead`、`.oldest_wait_seconds` gauges，以及摘要 `completed`/`failed`、摘要 duration/输入输出长度 histogram、上下文 `context_pending`/`context_unavailable`/`context_too_large` counters。指标禁止添加 userId、sessionId、原文和摘要标签。
+- [x] **Step 7: 验证服务与 SQL 变更。** 运行 Task 3 单测；`git diff --check`；检查 V13 文件没有 `DROP`、没有读写 Agent checkpoint 文件路径、没有 DELETE consultation_message。SQL 在隔离测试库验证后记录结果，禁止在本轮对个人本地运行库执行迁移。
+- [x] **Step 8: 提交本阶段。** 暂存 V13、init.sql、entity、mapper、service、metrics、tests，提交 `feat(server): persist context summary jobs` 并快进合入本地 `master`。
 
 ## Task 4: Agent HTTP 客户端和 Redis Streams Worker
 
 **目标文件：** `RealChatAgent.java`、`RealChatAgentContractTest.java`、`ContextSummaryOutboxWorker.java`、`ContextSummaryOutboxWorkerTest.java`、`application-example.yml`、`agent/requirements.txt`、`agent/services/agent_metrics.py`、`agent/tests/test_agent_metrics.py`。
 
-- [ ] **Step 1: 写 Java-Agent 契约测试。** 扩展 `RealChatAgentContractTest` 的本地 `HttpServer` fake：断言 `/api/agent/v2/context-summary` 路径、`X-Agent-Token`、消息批次和 prompt 版本；响应是 Agent 的固定 Pydantic JSON 对象而非 Spring `Result`；Agent 返回缺少来源字段或水位不匹配时客户端拒绝结果。
-- [ ] **Step 2: 确认测试失败。** `mvn -f server/pom.xml -Dtest=RealChatAgentContractTest test`；预期未实现摘要客户端方法时编译失败。
-- [ ] **Step 3: 实现摘要调用 DTO/客户端。** `RealChatAgent.summarizeContext(ContextSummaryAgentRequest)` 对请求和响应设独立 HTTP 总截止 65 秒，直接解析固定响应 DTO `ContextSummaryAgentResponse(summary, coveredThroughMessageId, promptVersion)`，校验 summary 内所有 source ID 属于 request 消息或 previous summary，且响应水位等于 request 实际批次最后一条消息 ID；聊天 Agent HTTP 总截止配置为 270 秒，必须长于 Agent 的 240 秒 turn deadline 且短于现有 300 秒 SSE 生命周期；绝不记录请求体；新增 DTO 与契约测试响应解析。
-- [ ] **Step 4: 写 Worker 分发恢复测试。** 使用 Mockito 验证 Worker 接收 `{outboxId}` 后先调用 `claimForProcessing(outboxId)`，空/过期 claim 直接 ACK；Agent 异常时调用 `fail(claim,errorCode)`，DB 退避状态写入成功后 ACK 当前 Stream record，由 Dispatcher 按数据库 `next_attempt_at` 再次发布；若 `fail` 本身未能写入，则不 ACK，让 pending reclaimer 恢复；删除后的 task 不会再请求 Agent。
-- [ ] **Step 5: 实现 Stream Worker。** 复用 `KnowledgeIndexOutboxWorker` 的 consumer group、`OutboxPendingReclaimer`、定期发布、pending replay、stale reclaim 和 `@PreDestroy` 停止；Stream 只传 outbox ID。单批从服务读最多 40 条/16,000 字符，Agent 调用在数据库事务外；Worker processing lease 初始 90 秒，长于 65 秒摘要 HTTP 总截止并留 25 秒结果提交窗口。完成后用 claim 中的目标水位、预期版本及 lease token CAS 写 summary/watermark；若目标水位增长则重新置 PENDING。
+- [x] **Step 1: 写 Java-Agent 契约测试。** 扩展 `RealChatAgentContractTest` 的本地 `HttpServer` fake：断言 `/api/agent/v2/context-summary` 路径、`X-Agent-Token`、消息批次和 prompt 版本；响应是 Agent 的固定 Pydantic JSON 对象而非 Spring `Result`；Agent 返回缺少来源字段或水位不匹配时客户端拒绝结果。
+- [x] **Step 2: 确认测试失败。** `mvn -f server/pom.xml -Dtest=RealChatAgentContractTest test`；预期未实现摘要客户端方法时编译失败。
+- [x] **Step 3: 实现摘要调用 DTO/客户端。** `RealChatAgent.summarizeContext(ContextSummaryAgentRequest)` 对请求和响应设独立 HTTP 总截止 65 秒，直接解析固定响应 DTO `ContextSummaryAgentResponse(summary, coveredThroughMessageId, promptVersion)`，校验 summary 内所有 source ID 属于 request 消息或 previous summary，且响应水位等于 request 实际批次最后一条消息 ID；聊天 Agent HTTP 总截止配置为 270 秒，必须长于 Agent 的 240 秒 turn deadline 且短于现有 300 秒 SSE 生命周期；绝不记录请求体；新增 DTO 与契约测试响应解析。
+- [x] **Step 4: 写 Worker 分发恢复测试。** 使用 Mockito 验证 Worker 接收 `{outboxId}` 后先调用 `claimForProcessing(outboxId)`，空/过期 claim 直接 ACK；Agent 异常时调用 `fail(claim,errorCode)`，DB 退避状态写入成功后 ACK 当前 Stream record，由 Dispatcher 按数据库 `next_attempt_at` 再次发布；若 `fail` 本身未能写入，则不 ACK，让 pending reclaimer 恢复；删除后的 task 不会再请求 Agent。
+- [x] **Step 5: 实现 Stream Worker。** 复用 `KnowledgeIndexOutboxWorker` 的 consumer group、`OutboxPendingReclaimer`、定期发布、pending replay、stale reclaim 和 `@PreDestroy` 停止；Stream 只传 outbox ID。单批从服务读最多 40 条/16,000 字符，Agent 调用在数据库事务外；Worker processing lease 初始 90 秒，长于 65 秒摘要 HTTP 总截止并留 25 秒结果提交窗口。完成后用 claim 中的目标水位、预期版本及 lease token CAS 写 summary/watermark；若目标水位增长则重新置 PENDING。
 
 Worker 的 ACK 边界按以下控制流实现，异常日志只记录 outbox ID 与分类错误码，不输出请求或摘要正文：
 
@@ -287,9 +287,9 @@ try {
 }
 ```
 
-- [ ] **Step 6: 测试并实现 Agent 指标。** 先新建 `agent/tests/test_agent_metrics.py`，断言 queue-wait、turn-deadline、summary-duration 指标会出现在 exposition 且不包含 user/session 标签；先运行 `cd agent; python -m pytest tests/test_agent_metrics.py -q` 确认因模块/路由不存在而失败。再在 `agent/services/agent_metrics.py` 用 `prometheus-client` 注册低基数 histogram/counter，在 `app.py` 挂载 `/metrics`；运行手册要求该路由只暴露给内部监控网络。
-- [ ] **Step 7: 添加配置示例并验证。** `application-example.yml` 增加 `amha.chat.context-summary.preflight-enabled=false`、`worker-enabled=false`、`agent-enabled=false`、stream key、批次与 lease 配置；`agent/requirements.txt` 增加 `prometheus-client>=0.20.0,<1.0.0`；Agent 配置增加 queue/turn/summary 并发阈值。使用当前可用的测试 Python 环境运行 `cd agent; python -m pytest tests/test_agent_metrics.py -q`；若缺少依赖，只能在隔离临时环境安装，不改已有虚拟环境。后端运行 `mvn -f server/pom.xml -Dtest=RealChatAgentContractTest,ContextSummaryOutboxServiceTest,ContextSummaryOutboxWorkerTest test`。
-- [ ] **Step 8: 提交本阶段。** 提交 `feat(server): process context summary outbox tasks` 并快进合入本地 `master`。
+- [x] **Step 6: 测试并实现 Agent 指标。** 先新建 `agent/tests/test_agent_metrics.py`，断言 queue-wait、turn-deadline、summary-duration 指标会出现在 exposition 且不包含 user/session 标签；先运行 `cd agent; python -m pytest tests/test_agent_metrics.py -q` 确认因模块/路由不存在而失败。再在 `agent/services/agent_metrics.py` 用 `prometheus-client` 注册低基数 histogram/counter，在 `app.py` 挂载 `/metrics`；运行手册要求该路由只暴露给内部监控网络。
+- [x] **Step 7: 添加配置示例并验证。** `application-example.yml` 增加 `amha.chat.context-summary.preflight-enabled=false`、`worker-enabled=false`、`agent-enabled=false`、stream key、批次与 lease 配置；`agent/requirements.txt` 增加 `prometheus-client>=0.20.0,<1.0.0`；Agent 配置增加 queue/turn/summary 并发阈值。使用当前可用的测试 Python 环境运行 `cd agent; python -m pytest tests/test_agent_metrics.py -q`；若缺少依赖，只能在隔离临时环境安装，不改已有虚拟环境。后端运行 `mvn -f server/pom.xml -Dtest=RealChatAgentContractTest,ContextSummaryOutboxServiceTest,ContextSummaryOutboxWorkerTest test`。
+- [x] **Step 8: 提交本阶段。** 提交 `feat(server): process context summary outbox tasks` 并快进合入本地 `master`。
 
 ## Task 5: Java 上下文组装与 turn 恢复状态机
 
