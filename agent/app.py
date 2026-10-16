@@ -43,6 +43,7 @@ from services.llm_governance import (
     ProviderCircuitOpen,
     llm_call_governor,
 )
+from services.llm_config import LLMNotConfigured, require_llm_credentials
 from prompts.context_summary_prompt import CONTEXT_SUMMARY_PROMPT_VERSION
 from tools.mental_health_tools import CURRENT_AGENT_CONTEXT
 
@@ -322,6 +323,11 @@ async def delete_session_v2(
 
 
 def _build_chat_stream_response(request: ChatRequest) -> StreamingResponse:
+    try:
+        agent_chat_service.ensure_model_configured()
+    except LLMNotConfigured as error:
+        raise HTTPException(status_code=503, detail=error.code) from error
+
     messages_dict = [{"senderType": m.senderType, "content": m.content} for m in request.messages]
     request_context = dict(request.context)
     request_context.pop("contextSummary", None)
@@ -399,6 +405,13 @@ async def summarize_chat_context(
 ):
     if request.prompt_version != CONTEXT_SUMMARY_PROMPT_VERSION:
         raise HTTPException(status_code=422, detail="unsupported prompt version")
+
+    try:
+        require_llm_credentials()
+        if context_summary_service.model is None:
+            context_summary_service.model = agent_chat_service.ensure_model_configured()
+    except LLMNotConfigured as error:
+        raise HTTPException(status_code=503, detail=error.code) from error
 
     try:
         summary = await context_summary_service.summarize(

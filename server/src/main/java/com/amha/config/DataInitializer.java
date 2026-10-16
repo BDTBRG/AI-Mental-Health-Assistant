@@ -10,6 +10,7 @@ import org.springframework.boot.CommandLineRunner;
 import org.springframework.context.annotation.Profile;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -27,22 +28,26 @@ public class DataInitializer implements CommandLineRunner {
     private final ConsultationMessageMapper consultationMessageMapper;
     private final EmotionDiaryMapper emotionDiaryMapper;
     private final KnowledgeIndexOutboxService knowledgeIndexOutboxService;
+    private final DemoSeedAdvisoryLock demoSeedAdvisoryLock;
 
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
 
     @Override
+    @Transactional
     public void run(String... args) {
-        if (hasData()) {
-            log.info("数据已存在，跳过初始化");
-            return;
-        }
-        log.info("开始初始化数据...");
-        initUsers();
-        initCategories();
-        initArticles();
-        initDiaries();
-        initConsultations();
-        log.info("数据初始化完成");
+        demoSeedAdvisoryLock.runWithLock(() -> {
+            if (hasData()) {
+                log.info("数据已存在，跳过初始化");
+                return;
+            }
+            log.info("开始初始化数据...");
+            initUsers();
+            initCategories();
+            initArticles();
+            initDiaries();
+            initConsultations();
+            log.info("数据初始化完成");
+        });
     }
 
     private boolean hasData() {

@@ -23,6 +23,7 @@ class FakeModel:
 @pytest.fixture
 async def client(monkeypatch):
     monkeypatch.setattr(config, "AGENT_INTERNAL_TOKEN", "unit-test-agent-token")
+    monkeypatch.setattr(config, "DEEPSEEK_API_KEY", "unit-test-api-key")
     async with AsyncClient(
         transport=ASGITransport(app=app_module.app),
         base_url="http://test",
@@ -50,6 +51,28 @@ async def test_context_summary_route_requires_the_internal_token(client):
     )
 
     assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_context_summary_returns_explicit_unconfigured_error_without_provider_key(
+    client, monkeypatch
+):
+    monkeypatch.setattr(config, "DEEPSEEK_API_KEY", "")
+    monkeypatch.setattr(
+        app_module,
+        "context_summary_service",
+        ContextSummaryService(None),
+        raising=False,
+    )
+
+    response = await client.post(
+        "/api/agent/v2/context-summary",
+        json=summary_request(),
+        headers={"X-Agent-Token": "unit-test-agent-token"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "LLM_NOT_CONFIGURED"
 
 
 @pytest.mark.asyncio

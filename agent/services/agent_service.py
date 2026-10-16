@@ -4,6 +4,7 @@ import logging
 import hashlib
 import asyncio
 import json
+import threading
 from dataclasses import dataclass, field
 from typing import Any, AsyncGenerator, Dict, List, Literal, Tuple, TypedDict
 
@@ -31,6 +32,7 @@ from tools.mental_health_tools import (
     CURRENT_RETRIEVED_SOURCES,
 )
 from services.citation_service import review_source_citations
+from services.llm_config import has_llm_credentials, require_llm_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -70,19 +72,33 @@ class AgentChatService:
     PRIVATE_CONTEXT_TOOLS = frozenset({"get_emotion_history", "get_user_memories"})
 
     def __init__(self):
-        self.base_llm = ChatOpenAI(
-            model=config.DEEPSEEK_MODEL,
-            api_key=config.DEEPSEEK_API_KEY,
-            base_url=config.DEEPSEEK_BASE_URL,
-            temperature=0.7,
-            max_tokens=config.LLM_MAX_OUTPUT_TOKENS,
-            timeout=config.LLM_REQUEST_TIMEOUT_SECONDS,
-            max_retries=1,
-        )
-        self.llm_with_tools = self.base_llm.bind_tools(ALL_TOOLS)
+        self.base_llm = None
+        self.llm_with_tools = None
+        self._model_lock = threading.Lock()
         self.graph = None
         self.checkpointer = None
         self.session_lifecycle = SessionLifecycleGuard("sqlite")
+        if has_llm_credentials():
+            self.ensure_model_configured()
+
+    def ensure_model_configured(self):
+        """Create the provider client lazily so health endpoints work without a key."""
+        require_llm_credentials()
+        if self.base_llm is None or self.llm_with_tools is None:
+            with self._model_lock:
+                if self.base_llm is None:
+                    self.base_llm = ChatOpenAI(
+                        model=config.DEEPSEEK_MODEL,
+                        api_key=config.DEEPSEEK_API_KEY.strip(),
+                        base_url=config.DEEPSEEK_BASE_URL,
+                        temperature=0.7,
+                        max_tokens=config.LLM_MAX_OUTPUT_TOKENS,
+                        timeout=config.LLM_REQUEST_TIMEOUT_SECONDS,
+                        max_retries=1,
+                    )
+                if self.llm_with_tools is None:
+                    self.llm_with_tools = self.base_llm.bind_tools(ALL_TOOLS)
+        return self.base_llm
 
     def configure_checkpointer(self, checkpointer, session_lifecycle=None) -> None:
         self.checkpointer = checkpointer
@@ -179,6 +195,7 @@ class AgentChatService:
     async def _call_model(
         self, state: AgentState, runtime: Runtime[AgentRequestContext]
     ) -> Dict[str, Any]:
+        self.ensure_model_configured()
         call_context = {
             "userId": runtime.context.values.get("userId"),
             "turnId": state.get("turn_id", ""),
@@ -277,6 +294,7 @@ class AgentChatService:
     async def _force_final(
         self, state: AgentState, runtime: Runtime[AgentRequestContext]
     ) -> Dict[str, Any]:
+        self.ensure_model_configured()
         forced_messages = self._messages_for_model(
             state["messages"], runtime.context
         ) + [

@@ -12,6 +12,7 @@ import app as app_module
 import config
 from app import app
 from services.agent_service import agent_chat_service
+from services.agent_service import AgentChatService
 from services.diary_service import diary_service
 from services.emotion_service import emotion_service
 from services.rag_service import rag_service
@@ -20,6 +21,7 @@ from services.rag_service import rag_service
 @pytest.fixture
 async def client(monkeypatch):
     monkeypatch.setattr(config, "AGENT_INTERNAL_TOKEN", "unit-test-agent-token")
+    monkeypatch.setattr(config, "DEEPSEEK_API_KEY", "unit-test-api-key")
     transport = ASGITransport(app=app)
     async with AsyncClient(
         transport=transport,
@@ -60,6 +62,15 @@ class TestHealthCheck:
         data = response.json()
         assert data["status"] == "ok"
 
+    async def test_service_construction_does_not_create_model_client_without_key(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(config, "DEEPSEEK_API_KEY", "")
+        service = AgentChatService()
+
+        assert service.base_llm is None
+        assert service.llm_with_tools is None
+
     async def test_liveness_remains_available_before_application_is_ready(self, client, monkeypatch):
         monkeypatch.setattr(app.state, "ready", False, raising=False)
 
@@ -95,6 +106,22 @@ class TestHealthCheck:
 
         assert response.status_code == 200
         assert response.json()["status"] == "ready"
+
+    async def test_readiness_does_not_require_an_optional_model_key(
+        self, client, monkeypatch
+    ):
+        monkeypatch.setattr(config, "DEEPSEEK_API_KEY", "")
+        monkeypatch.setattr(app.state, "ready", True, raising=False)
+        dependency_check = AsyncMock(return_value=True)
+        monkeypatch.setattr(
+            app_module, "_dependencies_available", dependency_check, raising=False
+        )
+
+        response = await client.get("/api/agent/health/ready")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "ready"
+        dependency_check.assert_awaited_once()
 
     async def test_readiness_fails_when_a_shared_dependency_is_unavailable(
         self, client, monkeypatch
@@ -166,6 +193,21 @@ class TestHealthCheck:
 
 
 class TestChat:
+    async def test_chat_returns_explicit_unconfigured_error_without_provider_key(
+        self, client, monkeypatch
+    ):
+        monkeypatch.setattr(config, "DEEPSEEK_API_KEY", "")
+
+        response = await client.post("/api/agent/v2/chat", json={
+            "sessionId": "missing-model-key",
+            "messages": [],
+            "userMessage": "Hello",
+            "context": {"generationToken": "generation-1", "turnId": "turn-1"},
+        })
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == "LLM_NOT_CONFIGURED"
+
     async def test_streaming_basic(self, client):
         body = {
             "sessionId": "test-1",

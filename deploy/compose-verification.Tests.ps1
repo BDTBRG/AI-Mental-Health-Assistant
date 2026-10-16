@@ -49,16 +49,50 @@ Describe 'Compose Qdrant startup gate' {
         $composeFile = Join-Path $PSScriptRoot '..\compose.yaml'
         $envFile = Join-Path $PSScriptRoot '.env.compose.example'
         $projectName = 'ningdu-mind-pester-test'
-        $configLines = & docker compose -p $projectName -f $composeFile --env-file $envFile config --format json 2>&1
+        $originalHttpProxy = $env:HTTP_PROXY
+        $originalHttpsProxy = $env:HTTPS_PROXY
+        try {
+            $env:HTTP_PROXY = 'http://build-proxy.invalid:8080'
+            $env:HTTPS_PROXY = 'http://build-proxy.invalid:8080'
+            $configLines = & docker compose -p $projectName -f $composeFile --env-file $envFile config --format json 2>&1
+        } finally {
+            if ($null -eq $originalHttpProxy) {
+                Remove-Item Env:HTTP_PROXY -ErrorAction SilentlyContinue
+            } else {
+                $env:HTTP_PROXY = $originalHttpProxy
+            }
+            if ($null -eq $originalHttpsProxy) {
+                Remove-Item Env:HTTPS_PROXY -ErrorAction SilentlyContinue
+            } else {
+                $env:HTTPS_PROXY = $originalHttpsProxy
+            }
+        }
         $LASTEXITCODE | Should Be 0
         $config = ($configLines -join [Environment]::NewLine) | ConvertFrom-Json
 
         ($config.services.qdrant.PSObject.Properties.Name -contains 'healthcheck') | Should Be $false
         $config.services.'qdrant-ready'.image | Should Be "ningdu-mind-agent:$projectName"
         $config.services.'agent-1'.image | Should Be "ningdu-mind-agent:$projectName"
+        $config.services.'agent-2'.image | Should Be "ningdu-mind-agent:$projectName"
         $config.services.'api-1'.image | Should Be "ningdu-mind-server:$projectName"
+        $config.services.'api-2'.image | Should Be "ningdu-mind-server:$projectName"
         $config.services.gateway.image | Should Be "ningdu-mind-web:$projectName"
         $config.services.'qdrant-ready'.build.dockerfile | Should Be 'agent/Dockerfile'
+        $config.services.'api-1'.build.dockerfile | Should Be 'server/Dockerfile'
+        $config.services.gateway.build.dockerfile | Should Be 'Dockerfile.frontend'
+        $agentBuildArgs = @($config.services.'qdrant-ready'.build.args.PSObject.Properties.Name)
+        $apiBuildArgs = @($config.services.'api-1'.build.args.PSObject.Properties.Name)
+        $gatewayBuildArgs = @($config.services.gateway.build.args.PSObject.Properties.Name)
+        ($agentBuildArgs -contains 'HTTP_PROXY') | Should Be $true
+        ($agentBuildArgs -contains 'HTTPS_PROXY') | Should Be $true
+        ($apiBuildArgs -contains 'HTTP_PROXY') | Should Be $true
+        ($apiBuildArgs -contains 'HTTPS_PROXY') | Should Be $true
+        ($gatewayBuildArgs -contains 'HTTP_PROXY') | Should Be $true
+        ($gatewayBuildArgs -contains 'HTTPS_PROXY') | Should Be $true
+        foreach ($replica in @('agent-1', 'agent-2', 'api-2')) {
+            ($config.services.$replica.PSObject.Properties.Name -contains 'build') | Should Be $false
+            $config.services.$replica.pull_policy | Should Be 'never'
+        }
         ($config.services.'qdrant-ready'.entrypoint -join ' ') | Should Be 'python -c'
         $config.services.'qdrant-ready'.restart | Should Be 'no'
         $config.services.'qdrant-ready'.depends_on.qdrant.condition | Should Be 'service_started'

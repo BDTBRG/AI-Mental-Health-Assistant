@@ -18,12 +18,10 @@ x-agent-environment: &agent-environment
 
 x-agent-image: &agent-image
   image: ningdu-mind-agent:${COMPOSE_PROJECT_NAME:-local}
-  build:
-    context: .
-    dockerfile: agent/Dockerfile
 
 x-agent-service: &agent-service
   <<: *agent-image
+  pull_policy: never
   environment: *agent-environment
   restart: unless-stopped
   stop_grace_period: 40s
@@ -71,9 +69,6 @@ x-api-environment: &api-environment
 
 x-api-service: &api-service
   image: ningdu-mind-server:${COMPOSE_PROJECT_NAME:-local}
-  build:
-    context: .
-    dockerfile: server/Dockerfile
   environment: *api-environment
   restart: unless-stopped
   stop_grace_period: 40s
@@ -178,6 +173,12 @@ services:
 
   qdrant-ready:
     <<: *agent-image
+    build:
+      context: .
+      dockerfile: agent/Dockerfile
+      args:
+        - HTTP_PROXY
+        - HTTPS_PROXY
     entrypoint: ["python", "-c"]
     command:
       - |
@@ -275,15 +276,25 @@ services:
 
   api-1:
     <<: *api-service
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+      args:
+        - HTTP_PROXY
+        - HTTPS_PROXY
 
   api-2:
     <<: *api-service
+    pull_policy: never
 
   gateway:
     image: ningdu-mind-web:${COMPOSE_PROJECT_NAME:-local}
     build:
       context: .
       dockerfile: Dockerfile.frontend
+      args:
+        - HTTP_PROXY
+        - HTTPS_PROXY
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:

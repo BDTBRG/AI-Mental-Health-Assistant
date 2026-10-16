@@ -10,6 +10,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 import config
 from prompts.emotion_prompt import EMOTION_SYSTEM_PROMPT, EMOTION_USER_TEMPLATE
 from services.llm_governance import llm_call_governor
+from services.llm_config import has_llm_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -18,15 +19,17 @@ class EmotionService:
     """Analyzes conversation emotion using DeepSeek LLM."""
 
     def __init__(self):
-        self.llm = ChatOpenAI(
-            model=config.DEEPSEEK_MODEL,
-            api_key=config.DEEPSEEK_API_KEY,
-            base_url=config.DEEPSEEK_BASE_URL,
-            temperature=0.3,
-            max_tokens=512,
-            timeout=config.LLM_REQUEST_TIMEOUT_SECONDS,
-            max_retries=1,
-        )
+        self.llm = None
+        if has_llm_credentials():
+            self.llm = ChatOpenAI(
+                model=config.DEEPSEEK_MODEL,
+                api_key=config.DEEPSEEK_API_KEY.strip(),
+                base_url=config.DEEPSEEK_BASE_URL,
+                temperature=0.3,
+                max_tokens=512,
+                timeout=config.LLM_REQUEST_TIMEOUT_SECONDS,
+                max_retries=1,
+            )
 
     def _format_conversation(self, messages: List[Dict]) -> str:
         """Format messages into a readable conversation string."""
@@ -94,6 +97,18 @@ class EmotionService:
         ]
 
         try:
+            if self.llm is None and has_llm_credentials():
+                self.llm = ChatOpenAI(
+                    model=config.DEEPSEEK_MODEL,
+                    api_key=config.DEEPSEEK_API_KEY.strip(),
+                    base_url=config.DEEPSEEK_BASE_URL,
+                    temperature=0.3,
+                    max_tokens=512,
+                    timeout=config.LLM_REQUEST_TIMEOUT_SECONDS,
+                    max_retries=1,
+                )
+            if self.llm is None:
+                return self._unknown_analysis("模型服务未配置，暂不能判断风险")
             response = await llm_call_governor.invoke(
                 self.llm, llm_messages, "emotion-analysis",
                 request_context=request_context,

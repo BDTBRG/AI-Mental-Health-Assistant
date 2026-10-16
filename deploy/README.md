@@ -10,7 +10,7 @@
 Copy-Item deploy/.env.compose.example .env.compose -NoClobber
 ```
 
-编辑 `.env.compose`，替换本地演示密码和 JWT/Agent 内部密钥。密码会进入数据库连接 URL，建议使用 URL 安全字符。需要真实模型回复时，再填入你有权使用的 `DEEPSEEK_API_KEY`；留空时，界面和服务可启动，但模型生成不可用。
+编辑 `.env.compose`，替换本地演示密码和 JWT/Agent 内部密钥。密码会进入数据库连接 URL，建议使用 URL 安全字符。需要真实模型回复时，再填入你有权使用的 `DEEPSEEK_API_KEY`；留空时，Agent 仍可启动并通过健康/就绪检查，对话与上下文摘要请求会返回 HTTP 503 和 `LLM_NOT_CONFIGURED`，不会伪造模型回复。填入或更换 Key 后需重建 Agent 容器使配置生效。
 
 `CRISIS_RESOURCE_TEXT` 默认留空。只有部署方已从当地官方渠道核验联系信息时，才填写可展示的纯文本资源；联系信息来源和复核日期应记录在部署方的配置管理中。未配置时，风险回复仍建议联系当地紧急服务或就近急诊，不会输出未经核验的电话号码。
 
@@ -22,7 +22,11 @@ docker compose -p $projectName --env-file .env.compose up -d --build
 docker compose -p $projectName --env-file .env.compose ps
 ```
 
-打开 <http://127.0.0.1:8080>。仅 Nginx 网关绑定本机端口；MySQL、Redis、PostgreSQL、Qdrant、RustFS 和 Agent 端口没有发布到宿主机。Spring Boot 使用 `demo` profile，首次初始化时会写入仓库已有的演示账号和模拟内容，不要把这套账号用于共享或生产环境。
+`qdrant-ready` 是 Agent 镜像唯一的构建服务，`api-1` 是 Spring 镜像唯一的构建服务；对应副本只引用相同镜像标签且不尝试拉取远程标签，避免 `up --build` 并发构建并覆盖本地标签或在构建完成前拉取不存在的镜像。前端镜像仍由 `gateway` 构建。
+
+构建会将宿主机设置的 `HTTP_PROXY` 和 `HTTPS_PROXY` 作为可选 BuildKit 代理参数传入依赖安装步骤。本机代理若只监听宿主机回环地址，容器内需使用 `host.docker.internal` 可达的代理地址。
+
+打开 <http://127.0.0.1:8080>。仅 Nginx 网关绑定本机端口；MySQL、Redis、PostgreSQL、Qdrant、RustFS 和 Agent 端口没有发布到宿主机。Spring Boot 使用 `demo` profile，首次初始化时会写入仓库已有的演示账号和模拟内容，不要把这套账号用于共享或生产环境。两个 API 副本通过 MySQL 命名锁串行执行初始化，并在同一事务中写入演示数据；等待锁超过 60 秒或初始化失败时，该副本启动失败并由 Compose 重试，不会把锁竞争当作“初始化成功”。H2 单进程测试环境使用事务但不提供跨进程锁；双副本保证以本地 MySQL Compose 验收为准。
 
 项目名由当前 checkout 绝对路径的 SHA-256 前 16 位生成，同一路径下停止/重启会命中同一 Compose 项目，不同目录的克隆会使用不同容器和数据卷。在新的 PowerShell 窗口中先重新计算项目名，再停止或启动：
 
