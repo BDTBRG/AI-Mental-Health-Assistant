@@ -328,18 +328,20 @@ switch (preparation.status()) {
 
 已 superseded 的旧 ID 直接返回 `CONTEXT_REQUEST_SUPERSEDED`、`retryable=false`；请求在预检期间被另一轮 supersede 时，也应以事务锁内最终状态生成响应。
 
-`READY` 预检结果还携带读取时的最新消息 ID。`beginTurn` 在锁定会话行后重新读取最新 ID；若两者不同，返回可重试的 `CONTEXT_SNAPSHOT_STALE`，且不写 turn/用户消息、不调用 Agent。Assembler 同时校验最新消息查询与 `MAX(id)` 读数一致，避免跨 SQL 查询形成不一致快照。
+`READY` 预检结果还携带读取时的最新消息 ID。`beginTurn` 在锁定会话行后重新读取最新 ID；若两者不同，不调用 Agent，事务回滚后由独立事务持久化原 request ID、请求哈希、用户消息和 `CONTEXT_UNAVAILABLE` turn，再返回可重试的 `CONTEXT_SNAPSHOT_STALE`。前端停止当前请求、保留 marker 并等待手动重试。即使另一轮仍活动也必须持久化 stale 请求；同 ID 重试若仍需摘要，会先转为 `WAITING_CONTEXT` 并入队；若上下文 READY，`beginTurn` 才检查其他活动轮次，此时仍有效的 `WAITING_CONTEXT` 或未超时 `PENDING`/`RUNNING` turn 会导致立即冲突、不排队生成，超时 `PENDING`/`RUNNING` turn 按 5 分钟失效规则处理。Assembler 同时校验最新消息查询与 `MAX(id)` 读数一致，避免跨 SQL 查询形成不一致快照。
+
+`expireOrRejectOtherActiveTurn` 必须在会话锁下读取全部其他 `RUNNING`/`PENDING`/`WAITING_CONTEXT` turn，先检查全部状态，再处理超时记录；若任一轮仍有效则整笔事务以冲突回滚，不得先将较早的过期行置为 `FAILED`。仅当不存在任何有效阻塞轮次时，才把全部过期的 `PENDING`/`RUNNING` 标为 `FAILED` 并追加错误事件，防止首条旧记录遮住后续有效轮次。
 
 `SUMMARY_PENDING` 返回 `CONTEXT_SUMMARY_PENDING`；服务/模型不可用或摘要功能关闭时用 `CONTEXT_SUMMARY_UNAVAILABLE`，保留原文和同一 request ID 以便在尚未被后续消息替代时恢复，不提交超预算历史给 Agent；最近窗口超限为终态 `CONTEXT_WINDOW_TOO_LARGE`，并原子保存该轮和用户消息。成功、待整理、不可用和窗口超限等新请求路径持久化较新消息时，都会在同一事务中 supersede 其他不可用请求；旧请求得到不可重试的 `CONTEXT_REQUEST_SUPERSEDED`。READY 后向 `ChatAgent.streamResponse` 传 raw history 与单独的 `userMessage`；如果正在恢复 WAITING_CONTEXT，该轮已存储的用户消息必须从 raw history 中按其最新 ID 排除，不能重复注入。`completeTurn` 才触发异步整理；`deleteSession` 删除 summary/outbox 并阻止晚到 Worker 复活数据。
-- [x] **Step 7: 写集成回归。** 在 `ChatControllerTest` 加 MockMvc 测试：当前 `/stream` Controller 声明 `produces=text/event-stream`，所以必须实际断言预检异常仍被 `GlobalExceptionHandler` 编码为 `application/json` HTTP 200 `Result`，不可只验证 service 异常对象。pending 的 `code=CONTEXT_SUMMARY_PENDING` 且 `data.retryable=true`、`retryAfterMs>0`；服务不可用为 `CONTEXT_SUMMARY_UNAVAILABLE` 且 `data.retryable=true` 并保留相同 ID；最近窗口超限为 `CONTEXT_WINDOW_TOO_LARGE` 且 `data.retryable=false`；后续消息取代的旧请求返回 `CONTEXT_REQUEST_SUPERSEDED` 且 `data.retryable=false`；预检后快照变旧返回可重试 `CONTEXT_SNAPSHOT_STALE`，不持久化该旧请求也不调用 Agent；`data.clientRequestId` 等于请求 ID；不带 ID 的兼容请求首次 pending 后，服务端生成的 ID 出现在响应并被后续同 ID 重试沿用；恢复后 user message 只一条且没有重复加入 Agent history；别人无法触发；删除后摘要/outbox 同事务不存在；Agent mock 收到 summary 但用户 API history 不泄露给其他用户。另验证管理员 DEAD 任务重放权限与操作者/时间审计。仅在 MockMvc 证明必需时修改 `ChatController` 媒体类型声明。
+- [x] **Step 7: 写集成回归。** 在 `ChatControllerTest` 加 MockMvc 测试：当前 `/stream` Controller 声明 `produces=text/event-stream`，所以必须实际断言预检异常仍被 `GlobalExceptionHandler` 编码为 `application/json` HTTP 200 `Result`，不可只验证 service 异常对象。pending 的 `code=CONTEXT_SUMMARY_PENDING` 且 `data.retryable=true`、`retryAfterMs>0`；服务不可用为 `CONTEXT_SUMMARY_UNAVAILABLE` 且 `data.retryable=true` 并保留相同 ID；最近窗口超限为 `CONTEXT_WINDOW_TOO_LARGE` 且 `data.retryable=false`；后续消息取代的旧请求返回 `CONTEXT_REQUEST_SUPERSEDED` 且 `data.retryable=false`；预检后快照变旧返回可重试 `CONTEXT_SNAPSHOT_STALE` 并持久化 request ID、哈希和关联用户消息，不调用 Agent；若摘要已 READY 但另一轮仍有效，同 ID 重试立即收到冲突且不排队，活动轮次完成后通过真实 `streamChat` 同 ID 重试并验证 Agent history 精确包含该轮上下文、stale 原文不重复；若重试预检仍待摘要，验证转入 `WAITING_CONTEXT` 并入队；`data.clientRequestId` 等于请求 ID；不带 ID 的兼容请求首次 pending 后，服务端生成的 ID 出现在响应并被后续同 ID 重试沿用；别人无法触发；删除后摘要/outbox 同事务不存在；Agent mock 收到 summary 但用户 API history 不泄露给其他用户。另验证管理员 DEAD 任务重放权限与操作者/时间审计。仅在 MockMvc 证明必需时修改 `ChatController` 媒体类型声明。
 - [x] **Step 8: 运行后端验证。** `mvn -f server/pom.xml -Dtest=ChatContextAssemblerTest,ChatControllerTest,RealChatAgentContractTest test`；之后运行 `mvn -f server/pom.xml test`。失败时先定位是本批回归还是已有环境/测试依赖问题，记录真实结果，不跳过失败用例。
 - [x] **Step 9: 提交本阶段。** 提交 `feat(server): resume chat turns after context compaction` 并快进合入本地 `master`。
 
 ## Task 6: 前端整理中状态、非 SSE 响应和手动恢复
 
-**目标文件：** `src/views/user/consultation.vue`、`src/views/user/consultation.spec.ts`。
+**目标文件：** `src/views/user/consultation.vue`、`src/views/user/consultation.spec.ts`、`src/types/user.ts`（扩展消息错误状态字段）。
 
-- [ ] **Step 1: 先写 pending UX 失败测试。** 在 `consultation.spec.ts` 模拟 `onopen` 收到 application/json `Result`，其中 `code=CONTEXT_SUMMARY_PENDING`、`data.retryable=true`、`retryAfterMs=5000`；断言页面显示整理提示、待发送用户消息仍可见、sessionStorage 只存 request ID、没有自动重试。另单测错误处理分支在响应提供 `data.clientRequestId` 时保存服务端生成 ID。
+- [x] **Step 1: 先写 pending UX 失败测试。** 在 `consultation.spec.ts` 模拟 `onopen` 收到 application/json `Result`，其中 `code=CONTEXT_SUMMARY_PENDING`、`data.retryable=true`、`retryAfterMs=5000`；断言页面显示整理提示、待发送用户消息仍可见、sessionStorage 只存 request ID、没有自动重试。另单测错误处理分支在响应提供 `data.clientRequestId` 时保存服务端生成 ID。
 
 ```ts
 it('keeps the request id and offers manual retry while context is summarized', async () => {
@@ -368,22 +370,22 @@ it('keeps the request id and offers manual retry while context is summarized', a
 	expect(mocks.fetchEventSource).toHaveBeenCalledTimes(1)
 })
 ```
-- [ ] **Step 2: 验证测试失败。** 根目录执行 `pnpm test -- src/views/user/consultation.spec.ts`；预期当前代码只显示通用断网文案。
-- [ ] **Step 3: 实现非 SSE 响应解析。** `onopen` 对 `response.clone().json()` 解析 Spring `Result` envelope；pending 显示“正在整理较早的对话”、保留同 ID 和手动“重新检查”；若旧客户端未发送 ID，则从 `data.clientRequestId` 建立 pending storage；unavailable 显示“暂时无法整理，请稍后重试”，保留同 ID 但不显示持续整理状态；快照过期显示“会话已有新内容，请重新检查”，保留 ID 并允许用户手动重试；窗口超限显示新建会话提示并清理不可重试的 pending 标记；被后续消息替代时显示“该请求已被后续对话替代”，清除对应 pending 标记且不自动重试。对 401、HTML 错页及非 JSON 仍走当前通用断网恢复逻辑。
-- [ ] **Step 4: 验证刷新与重复语义。** 增加刷新后从后端已保存的最后一条 user message 恢复 `clientRequestId`、同一 retry 沿用 request ID、重复点击不会创建不同 request ID、终态超限不自动重播等测试；运行 `pnpm test -- src/views/user/consultation.spec.ts` 和 `pnpm build`。
-- [ ] **Step 5: 提交本阶段。** 暂存上述两个前端文件，提交 `feat(web): surface resumable context preparation` 并快进合入本地 `master`。
+- [x] **Step 2: 验证测试失败。** 根目录执行 `pnpm test -- src/views/user/consultation.spec.ts`；预期当前代码只显示通用断网文案。
+- [x] **Step 3: 实现非 SSE 响应解析与精确恢复。** `onopen` 对 `response.clone().json()` 解析 Spring `Result` envelope；pending 显示“正在整理较早的对话”、保留同 ID 和手动“重新检查”；服务端回显的 request ID 不匹配时保留原 marker 并锁住当前轮次；unavailable 显示“暂时无法整理，请稍后重试”，保留同 ID 但不显示持续整理状态；快照过期在独立事务中持久化 turn 与原始消息，清空未修改的输入草稿并保留 ID；窗口超限显示新建会话提示并清理不可重试的 pending 标记；被后续消息替代时显示替代说明，清除对应 pending 标记且不自动重试。刷新后不再把 ID 猜配给历史最后一条消息，而是调用会话归属校验的恢复 API；只有服务端返回关联消息 ID、内容哈希匹配且状态可恢复时才重放。启动时按页搜索 browser pending marker 对应会话，并提供“待恢复会话”入口访问旧页会话；一次只恢复当前选择的一轮。恢复接口网络失败时保留标记并展示可重试的会话加载错误；旧记录缺少消息关联时失败关闭并提示重新输入。恢复已有历史消息时保留原时间，缺少可信时间则显示“时间未知”。删除当前恢复会话或切换会话不会留下全局发送门控。pending 标记只由对应 request ID 清理，避免旧响应删除新轮次的恢复状态。对 401、HTML 错页及非 JSON 仍走当前通用断网恢复逻辑。
+- [x] **Step 4: 验证刷新与重复语义。** 覆盖精确消息关联、第 11 页旧会话可发现和可选、同会话后续消息不会错配、不可恢复记录不自动重播、恢复 API 暂时失败后可重试、同一 retry 沿用 request ID、待处理时禁止新消息、请求 ID 回显错误保留 marker、恢复等待期间删除/切换、保留原时间、快照过期刷新恢复、终态超限不自动重播及旧轮次不能清除新轮次恢复标记等测试；运行 `pnpm test -- src/views/user/consultation.spec.ts` 和 `pnpm build`。
+- [ ] **Step 5: 提交本阶段。** 暂存上述前端代码、测试及本计划文档，提交 `feat(web): surface resumable context preparation` 并快进合入本地 `master`。
 
 ## Task 7: 离线质量集、运行手册与总体验收
 
 **目标文件：** Agent 合成 fixture/tests、`ChatControllerTest`、新运行手册、V13 和所有本批文件。
 
-- [ ] **Step 1: 增加固定合成摘要 fixture。** 覆盖明确背景、用户偏好、未解决话题、过时信息和用户纠正、相互矛盾表述、prompt injection、空消息及最小化敏感信息；通过来源 ID 与结构断言验收，人工复核自然语言语义，不写虚构准确率。
-- [ ] **Step 2: 完成失败路径回归。** Agent 测试验证 queue timeout、turn deadline、模型超时、非法摘要 JSON、未知 source ID、外部 token 缺失、checkpoint 未包含摘要；Java 测试验证 Redis 重复/过期 delivery、最大重试 DEAD、会话删除、CAS 竞争；前端验证 pending 重试和终态提示。
-- [ ] **Step 3: 写运行手册。** `docs/operations/chat-context-summary-runbook.md` 写明 V13 备份/预检/执行/回滚、配置键和默认值、Outbox backlog/DEAD 查看方法、通过 `POST /api/admin/context-summary/{sessionId}/retry` 进行管理员手动重放及审计字段核对、先启用 Agent 再 Worker 最后打开用户预检的发布顺序、关闭摘要生成时客户端错误行为、检查无明文日志的方法；手册注明本轮不自动运行 SQL、不清理旧数据。
-- [ ] **Step 4: 执行完整本地验证。** 从 `agent/` 执行 `python -m pytest -q`；从根目录执行 `mvn -f server/pom.xml test`、`pnpm test`、`pnpm build`；在工作区执行 `git -c core.whitespace=cr-at-eol diff --check`。如果 Java 集成测试依赖本地服务，按 `server/src/test/resources/application.yml` 核实测试库，不触碰开发数据。
-- [ ] **Step 5: 检查多实例环境条件。** 执行 `docker info`；Engine 不可用时记录 Compose 验收未完成，不用 mock 或静态检查替代。可用时按 `deploy/README.md` 的稳定 project name 启动已有 Compose stack，执行 `powershell -NoProfile -ExecutionPolicy Bypass -File deploy/verify-compose.ps1`，再以专用演示账号和合成对话验证至少两个 Spring Boot 与两个 Agent 实例：一台副本写入 WAITING_CONTEXT/Outbox、另一副本消费并完成摘要、跨副本 pending recovery、会话删除竞态和重启后任务可恢复。不得把真实会话用于此验收；不清理命名卷、不连接外部生产服务。若缺少模型凭据，则把跨副本 Outbox/摘要处理标为未验证，不以健康检查替代。
-- [ ] **Step 6: 复核安全边界。** 检查每个摘要查询均绑定 session/user；`rg` 确认摘要正文不进入日志语句、Redis Stream payload、checkpoint state 或普通会话列表响应；确认保留所有原始消息且迁移不接触 SQLite/上传文件。
-- [ ] **Step 7: 最终提交与合并。** 审查 `git status --short`、`git diff --cached --name-status`，只暂存本计划列出的代码、测试、迁移和新运行手册；提交 `feat(chat): add resumable rolling context summaries` 并快进合入本地 `master`，不推送、不部署。
+- [x] **Step 1: 增加固定合成摘要 fixture。** 覆盖明确背景、用户偏好、未解决话题、过时信息和用户纠正、相互矛盾表述、prompt injection、空消息及最小化敏感信息；通过来源 ID 与结构断言验收，人工复核自然语言语义，不写虚构准确率。
+- [x] **Step 2: 完成失败路径回归。** Agent 测试验证 queue timeout、turn deadline、模型超时、非法摘要 JSON、未知 source ID、外部 token 缺失、checkpoint 未包含摘要；Java 测试验证 Redis 重复/过期 delivery、最大重试 DEAD、会话删除、CAS 竞争、stale turn 在另一轮结束后的真实 `streamChat` 同 ID 恢复和精确消息上下文，以及较早超时活动轮次不能掩盖后续 `WAITING_CONTEXT` 轮次；前端验证 pending 重试和终态提示。
+- [x] **Step 3: 写运行手册。** `docs/operations/chat-context-summary-runbook.md` 写明 V13/V14 备份/预检/执行/回滚、配置键和默认值、Outbox backlog/DEAD 查看方法、通过 `POST /api/admin/context-summary/{sessionId}/retry` 进行管理员手动重放及审计字段核对、按 Agent → Worker → 用户预检的启用顺序、关闭摘要生成时客户端错误行为、检查无明文日志的方法；手册注明本轮不自动运行 SQL、不清理旧数据。
+- [x] **Step 4: 执行完整本地验证。** 从 `agent/` 执行全量 pytest（161 passed、48 subtests passed）；从根目录执行 Maven 全量测试（33 suites、203 tests、0 failures/errors、1 skipped）、前端测试（12 files、96 tests）和生产构建（exit 0）；`git -c core.whitespace=cr-at-eol diff --check` 通过。Agent 依赖通过工作区外临时目录加载，未改项目虚拟环境；Java 使用测试配置中的 H2，不触碰开发数据库。
+- [ ] **Step 5: 检查多实例环境条件。** 当前 `docker info` 因 Docker Desktop Linux Engine named pipe 不存在而失败，记录为 Compose 跨副本验收未完成；Engine 可用后按 `deploy/README.md` 的稳定 project name 启动已有 Compose stack，执行 `powershell -NoProfile -ExecutionPolicy Bypass -File deploy/verify-compose.ps1`，再以专用演示账号和合成对话验证至少两个 Spring Boot 与两个 Agent 实例：一台副本写入 WAITING_CONTEXT/Outbox、另一副本消费并完成摘要、跨副本 pending recovery、会话删除竞态和重启后任务可恢复。不得把真实会话用于此验收；不清理命名卷、不连接外部生产服务。若缺少模型凭据，则把跨副本 Outbox/摘要处理标为未验证，不以健康检查替代。
+- [x] **Step 6: 复核安全边界。** 检查摘要查询均绑定 session/user；源代码扫描确认 Redis Stream 只传 Outbox ID、日志仅记录任务 ID/错误类型，摘要不进入 checkpoint（另有回归断言）或普通会话列表响应；V14 只添加消息关联列，原始会话消息保留，迁移不访问 SQLite/上传文件。
+- [x] **Step 7: 最终提交与合并。** 审查 `git status --short`、`git diff --cached --name-status`，只暂存本计划列出的代码、测试、迁移和新运行手册；提交 `feat(chat): add resumable rolling context summaries` 并快进合入本地 `master`，不推送、不部署。
 
 ## 设计覆盖自查
 

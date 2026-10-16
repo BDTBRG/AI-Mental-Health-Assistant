@@ -22,6 +22,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -88,6 +89,30 @@ class ContextSummaryOutboxWorkerTest {
 
         verify(agent, never()).summarizeContext(org.mockito.ArgumentMatchers.any());
         verify(operations).acknowledge(eq(GROUP), org.mockito.ArgumentMatchers.any(MapRecord.class));
+    }
+
+    @Test
+    void duplicateStreamDeliveryDoesNotCallAgentTwice() {
+        ContextSummaryOutboxService service = mock(ContextSummaryOutboxService.class);
+        RealChatAgent agent = mock(RealChatAgent.class);
+        StringRedisTemplate redis = mock(StringRedisTemplate.class);
+        StreamOperations<String, String, String> operations = mock(StreamOperations.class);
+        doReturn(operations).when(redis).opsForStream();
+        var claim = claim();
+        var request = request();
+        var response = response();
+        when(service.claimForProcessing(53L)).thenReturn(claim).thenReturn(null);
+        when(service.loadRequest(claim, 40, 16_000)).thenReturn(request);
+        when(agent.summarizeContext(request)).thenReturn(response);
+
+        ContextSummaryOutboxWorker worker = worker(service, agent, mock(ContextSummaryMetrics.class), redis);
+        MapRecord<String, String, String> record = record(Map.of("outboxId", "53"));
+        worker.onMessage(record);
+        worker.onMessage(record);
+
+        verify(agent, times(1)).summarizeContext(request);
+        verify(service, times(1)).complete(claim, response);
+        verify(operations, times(2)).acknowledge(eq(GROUP), eq(record));
     }
 
     @Test

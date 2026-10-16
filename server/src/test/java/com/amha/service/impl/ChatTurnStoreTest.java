@@ -13,8 +13,10 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -46,7 +48,7 @@ class ChatTurnStoreTest {
         ConsultationSession session = session();
         when(sessionMapper.selectByIdForUpdate(SESSION_ID)).thenReturn(session);
         when(turnMapper.selectBySessionAndRequestForUpdate(SESSION_ID, "request-1")).thenReturn(null);
-        when(turnMapper.selectActiveBySessionForUpdate(SESSION_ID)).thenReturn(null);
+        when(turnMapper.selectOtherActiveBySessionForUpdate(SESSION_ID, "request-1")).thenReturn(List.of());
         ChatTurnStore store = store();
 
         store.waitForContext(SESSION_ID, USER_ID, "request-1", "hash-1", "wait for summary", 18L);
@@ -119,7 +121,7 @@ class ChatTurnStoreTest {
         active.setUpdatedAt(LocalDateTime.now().minusHours(1));
         when(sessionMapper.selectByIdForUpdate(SESSION_ID)).thenReturn(session);
         when(turnMapper.selectBySessionAndRequestForUpdate(SESSION_ID, "new-request")).thenReturn(null);
-        when(turnMapper.selectActiveBySessionForUpdate(SESSION_ID)).thenReturn(active);
+        when(turnMapper.selectOtherActiveBySessionForUpdate(SESSION_ID, "new-request")).thenReturn(List.of(active));
 
         BusinessException error = assertThrows(BusinessException.class,
                 () -> store().beginTurn(SESSION_ID, USER_ID, "new-request", "new-hash", "next"));
@@ -134,7 +136,7 @@ class ChatTurnStoreTest {
         ConsultationSession session = session();
         when(sessionMapper.selectByIdForUpdate(SESSION_ID)).thenReturn(session);
         when(turnMapper.selectBySessionAndRequestForUpdate(SESSION_ID, "too-large")).thenReturn(null);
-        when(turnMapper.selectActiveBySessionForUpdate(SESSION_ID)).thenReturn(null);
+        when(turnMapper.selectOtherActiveBySessionForUpdate(SESSION_ID, "too-large")).thenReturn(List.of());
 
         store().rejectContextTurn(SESSION_ID, USER_ID, "too-large", "hash-large", "oversized");
 
@@ -146,6 +148,31 @@ class ChatTurnStoreTest {
         assertEquals("oversized", messageCaptor.getValue().getContent());
         assertEquals(1, session.getMessageCount());
         verify(summaryOutboxService, never()).enqueue(anyLong(), anyLong(), anyLong());
+    }
+
+    @Test
+    void unavailableTurnStoresTheExactUserMessageIdForRecovery() {
+        ConsultationSession session = session();
+        when(sessionMapper.selectByIdForUpdate(SESSION_ID)).thenReturn(session);
+        when(turnMapper.selectBySessionAndRequestForUpdate(SESSION_ID, "stale-request")).thenReturn(null);
+        when(messageMapper.insert(any(ConsultationMessage.class))).thenAnswer(invocation -> {
+            ConsultationMessage message = invocation.getArgument(0);
+            message.setId(901L);
+            return 1;
+        });
+
+        store().markContextUnavailable(SESSION_ID, USER_ID, "stale-request", "request-hash",
+                "the original stale request", true);
+
+        ArgumentCaptor<ConsultationChatTurn> turnCaptor = ArgumentCaptor.forClass(ConsultationChatTurn.class);
+        ArgumentCaptor<ConsultationMessage> messageCaptor = ArgumentCaptor.forClass(ConsultationMessage.class);
+        verify(turnMapper).insert(turnCaptor.capture());
+        verify(messageMapper).insert(messageCaptor.capture());
+        assertEquals("CONTEXT_UNAVAILABLE", turnCaptor.getValue().getStatus());
+        assertEquals("request-hash", turnCaptor.getValue().getRequestHash());
+        assertEquals(901L, ReflectionTestUtils.getField(turnCaptor.getValue(), "userMessageId"));
+        assertEquals("the original stale request", messageCaptor.getValue().getContent());
+        assertEquals(1, session.getMessageCount());
     }
 
     @Test

@@ -82,6 +82,52 @@ class ChatContextAssemblerTest {
     }
 
     @Test
+    void excludesPersistedCurrentMessageByItsOwnedLinkWhenLaterMessagesExist() {
+        ConsultationMessage linkedCurrentMessage = message(2L, SESSION_ID, 1, "retry original");
+        when(messageMapper.selectMaxMessageIdForOwner(SESSION_ID, USER_ID)).thenReturn(4L);
+        when(messageMapper.selectLatestAfterWatermarkForOwner(SESSION_ID, USER_ID, 0L, 41))
+                .thenReturn(List.of(message(1L, SESSION_ID, 1, "earlier"),
+                        linkedCurrentMessage, message(3L, SESSION_ID, 2, "later user reply"),
+                        message(4L, SESSION_ID, 2, "latest assistant reply")));
+        when(messageMapper.selectUserMessageByIdForOwner(2L, SESSION_ID, USER_ID))
+                .thenReturn(linkedCurrentMessage);
+
+        ChatContextPreparation result = assembler.prepare(
+                SESSION_ID, USER_ID, "retry original", true, 2L, java.util.Map.of());
+
+        assertEquals(ChatContextPreparation.Status.READY, result.status());
+        assertEquals(List.of(1L, 3L, 4L), result.history().stream().map(ConsultationMessage::getId).toList());
+        verify(messageMapper).selectUserMessageByIdForOwner(2L, SESSION_ID, USER_ID);
+    }
+
+    @Test
+    void rejectsPersistedCurrentMessageWhenItsOwnerScopedLinkDoesNotMatchTheRequest() {
+        when(messageMapper.selectMaxMessageIdForOwner(SESSION_ID, USER_ID)).thenReturn(2L);
+        when(messageMapper.selectLatestAfterWatermarkForOwner(SESSION_ID, USER_ID, 0L, 41))
+                .thenReturn(List.of(message(1L, SESSION_ID, 1, "original"),
+                        message(2L, SESSION_ID, 2, "later assistant")));
+        when(messageMapper.selectUserMessageByIdForOwner(1L, SESSION_ID, USER_ID))
+                .thenReturn(message(1L, SESSION_ID, 1, "different content"));
+
+        ChatContextPreparation result = assembler.prepare(
+                SESSION_ID, USER_ID, "original", true, 1L, java.util.Map.of());
+
+        assertEquals(ChatContextPreparation.Status.SUMMARY_UNAVAILABLE, result.status());
+    }
+
+    @Test
+    void doesNotGuessThePersistedCurrentMessageWhenTurnHasNoMessageLink() {
+        when(messageMapper.selectMaxMessageIdForOwner(SESSION_ID, USER_ID)).thenReturn(1L);
+        when(messageMapper.selectLatestAfterWatermarkForOwner(SESSION_ID, USER_ID, 0L, 41))
+                .thenReturn(List.of(message(1L, SESSION_ID, 1, "same text is not a safe link")));
+
+        ChatContextPreparation result = assembler.prepare(
+                SESSION_ID, USER_ID, "same text is not a safe link", true, java.util.Map.of());
+
+        assertEquals(ChatContextPreparation.Status.SUMMARY_UNAVAILABLE, result.status());
+    }
+
+    @Test
     void keepsThirtyNineRawHistoryMessagesAndCurrentInputWithinMessageLimit() {
         when(messageMapper.selectMaxMessageIdForOwner(SESSION_ID, USER_ID)).thenReturn(39L);
         when(messageMapper.selectLatestAfterWatermarkForOwner(SESSION_ID, USER_ID, 0L, 41))

@@ -75,7 +75,7 @@ MySQL 是任务权威状态；Redis Streams 仅负责唤醒和分发。建议字
 
 ### 4.3 升级与历史会话
 
-新增 `upgrade_v13_chat_context_summary.sql`，只创建所需表、索引和约束，不读取或改写本地 SQLite checkpoint，不删除会话消息，也不直接生成摘要。
+V13 (`upgrade_v13_chat_context_summary.sql`) 只创建摘要和 Outbox 表、索引及约束，不读取或改写本地 SQLite checkpoint，不删除会话消息，也不直接生成摘要。补充的 V14 (`upgrade_v14_chat_turn_message_link.sql`) 为 chat turn 增加可空 `user_message_id` 关联列，使请求 ID 指向准确的用户消息；脚本只在列缺失时添加，旧记录保持 NULL，不依据时间或内容猜测回填。
 
 现有会话按需整理：会话下一次请求发现未摘要历史超限时，事务内创建/合并 Outbox 任务。部署后可另行运行只读 dry-run，统计需要整理的会话数量和预计消息量；本批不自动对生产历史批量发起模型调用。升级脚本重复执行策略沿用当前数据库升级规范，并提供执行前备份及校验步骤。
 
@@ -112,7 +112,9 @@ MySQL 是任务权威状态；Redis Streams 仅负责唤醒和分发。建议字
 
 摘要不可用时，短会话若仍在完整上下文预算内可继续；长会话返回 `CONTEXT_SUMMARY_UNAVAILABLE` 并保留原 turn/request ID。若摘要恢复时尚无较新用户消息持久化，原 ID 可重试并恢复该 turn；若更新的请求已经持久化，旧不可用 turn 在同一会话锁定事务中转为终态 `CONTEXT_SUPERSEDED`，旧 ID 返回 `CONTEXT_REQUEST_SUPERSEDED`、`retryable=false`。前端清理该旧 ID，并继续处理较新的请求，避免旧请求因其消息不再是最新上下文而永久无法恢复。持久化成功、等待、不可用或拒绝的新请求都必须在同一事务内终结更早的 `CONTEXT_UNAVAILABLE` turn；同 ID 恢复不 supersede 自身。
 
-`READY` 上下文快照必须附带组装时观察到的最新消息 ID。Assembler 检查最新消息窗口与 `MAX(id)` 读数一致后才返回 `READY`；随后 `beginTurn` 先锁会话行，再重新读取最新消息 ID。若 ID 已变化，返回可重试的 `CONTEXT_SNAPSHOT_STALE` 和原 `clientRequestId`，不持久化该请求、不调用 Agent。此栅栏避免另一轮在预检与 turn 写入之间完成后，新一轮回答仍基于过期上下文生成。用户重试时保留请求 ID，由服务端重新组装最新快照。
+`READY` 上下文快照必须附带组装时观察到的最新消息 ID。Assembler 检查最新消息窗口与 `MAX(id)` 读数一致后才返回 `READY`；随后 `beginTurn` 先锁会话行，再重新读取最新消息 ID。若 ID 已变化，不调用 Agent；`beginTurn` 事务回滚后，服务端在独立事务中将原 request ID、请求哈希、用户消息和 `CONTEXT_UNAVAILABLE` turn 一起持久化，再返回可重试的 `CONTEXT_SNAPSHOT_STALE`。即使此时另一轮仍处于活动状态，也要先持久化 stale 请求，不终结或覆盖那一轮。前端识别 stale 错误后停止当前请求，保留 marker 并要求手动重试；若重试预检仍需摘要，服务端将原 turn 转为 `WAITING_CONTEXT` 并入队，用户可在摘要完成后手动重新检查。若上下文已经 READY，`beginTurn` 才检查其他活动轮次：另一轮仍为 `WAITING_CONTEXT`，或未超时的 `PENDING`/`RUNNING` 时返回业务冲突、不排队生成；超时 `PENDING`/`RUNNING` 轮次按 5 分钟失效规则处理。turn 通过 V14 的 `user_message_id` 关联准确原文。重试组装上下文时按该关联 ID 校验消息归属和正文，再从历史窗口中排除这条原文并将其作为本轮输入传给 Agent；不能假设它仍是会话最新消息。恢复后的上下文仍包含其他已持久化消息，且请求哈希必须匹配。刷新恢复使用用户归属校验接口，只有会话所有者、消息归属及 SHA-256 请求哈希全部匹配时才返回原文；旧记录无关联或校验失败时不猜测、不重播，客户端清除标记并提示重新输入。用户重试时保留请求 ID，由服务端重新组装最新快照。
+
+活动轮次门控必须在会话行锁下读取并检查全部其他活动 turn，先做完整阻塞判定，再修改任何超时记录。只要存在 `WAITING_CONTEXT` 或未超时的 `PENDING`/`RUNNING` 就返回冲突；只有所有其他 `PENDING`/`RUNNING` 都超过 5 分钟时，才统一标记失败并追加错误事件后继续。这样可以避免较早的过期 turn 掩盖另一条仍有效的生成或摘要等待。
 
 如果最近 12 条原文自身仍超过硬预算，或者有单条消息超过单条上限，则将该 turn 标为终态 `CONTEXT_REJECTED` 并返回 `CONTEXT_WINDOW_TOO_LARGE`，不删改原文，也不尝试基于缺失内容生成回答。产品端提供清楚提示，引导用户开启新会话；当前没有单条消息删除能力，本批不暗示该入口存在。不能自动缩减风险相关上下文。删除会话可以取消其 `WAITING_CONTEXT` turn 和相关摘要任务。
 
@@ -182,7 +184,7 @@ Spring Boot 的上下文预检错误沿用当前 HTTP 200 `Result` envelope。�
 
 ## 11. 分阶段发布与回滚
 
-1. 先发布兼容性代码和 V13 schema，功能开关默认关闭；现有调用仍使用原始历史路径，但同样应用 Agent 请求硬上限并明确超限语义。摘要预检、Outbox 任务创建和模型调用分别受开关控制。
+1. 先发布兼容性代码和 V13、V14 schema，功能开关默认关闭；现有调用仍使用原始历史路径，但同样应用 Agent 请求硬上限并明确超限语义。摘要预检、Outbox 任务创建和模型调用分别受开关控制。
 2. 开启摘要 Outbox/Worker，以合成数据验证失败重试、删除和幂等，再按需为测试会话整理历史。
 3. 小范围开启摘要上下文组装，观察队列等待、摘要失败、上下文 pending、Token 用量和用户重试行为。
 4. 若摘要服务异常，保留已有摘要和全部消息，暂停新任务但保留 Outbox 与 `WAITING_CONTEXT` 状态。短会话若完整上下文仍在预算内可继续；长会话返回明确的 `CONTEXT_SUMMARY_UNAVAILABLE`，不无限显示整理中、不回退成无限长度历史请求。经运维恢复或显式重放后，若没有较新用户消息持久化，同一 ID 可重新预检；若较新请求已持久化，旧不可用 turn 转为终态 `CONTEXT_SUPERSEDED` 并返回不可重试的 `CONTEXT_REQUEST_SUPERSEDED`。最近窗口本身超限则终结为 `CONTEXT_REJECTED`。

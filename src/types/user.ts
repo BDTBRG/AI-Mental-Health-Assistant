@@ -21,6 +21,14 @@ export interface StartSession {
 	reviewConsent?: boolean
 }
 
+export interface ChatTurnRecovery {
+	clientRequestId: string
+	status: string
+	userMessageId: number | null
+	userMessage: string | null
+	recoverable: boolean
+}
+
 // 分页查询历史咨询会话数据
 export interface HistorySession {
 	id: number
@@ -61,6 +69,8 @@ export interface Message {
 	clientRequestId?: string
 	requestContent?: string
 	canReconnect?: boolean
+	errorCode?: string
+	retryLabel?: string
 }
 
 // 会话情绪分析响应数据

@@ -65,6 +65,14 @@ public class ChatController {
         return Result.success(chatService.getSessionMessages(sessionId, userId, userType));
     }
 
+    @GetMapping("/sessions/{sessionId}/turns/{clientRequestId}")
+    public Result<ChatTurnRecoveryResponse> recoverChatTurn(@PathVariable Long sessionId,
+                                                             @PathVariable String clientRequestId,
+                                                             HttpServletRequest httpRequest) {
+        Long userId = (Long) httpRequest.getAttribute("userId");
+        return Result.success(chatService.recoverChatTurn(sessionId, clientRequestId, userId));
+    }
+
     @PutMapping("/sessions/{sessionId}/review-consent")
     public Result<Void> updateReviewConsent(@PathVariable Long sessionId,
                                              @Valid @RequestBody ReviewConsentRequest request,

@@ -22,6 +22,14 @@ public interface ConsultationMessageMapper extends BaseMapper<ConsultationMessag
 
     @Select("SELECT m.* FROM consultation_message m "
             + "JOIN consultation_session s ON s.id = m.session_id "
+            + "WHERE m.id = #{messageId} AND m.session_id = #{sessionId} "
+            + "AND s.user_id = #{userId} AND m.sender_type = 1 LIMIT 1")
+    ConsultationMessage selectUserMessageByIdForOwner(@Param("messageId") Long messageId,
+                                                       @Param("sessionId") Long sessionId,
+                                                       @Param("userId") Long userId);
+
+    @Select("SELECT m.* FROM consultation_message m "
+            + "JOIN consultation_session s ON s.id = m.session_id "
             + "WHERE m.session_id = #{sessionId} AND s.user_id = #{userId} "
             + "AND m.id > #{afterMessageId} ORDER BY m.id DESC LIMIT #{limit}")
     List<ConsultationMessage> selectLatestAfterWatermarkForOwner(@Param("sessionId") Long sessionId,

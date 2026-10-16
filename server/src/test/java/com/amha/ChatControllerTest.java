@@ -1814,7 +1814,8 @@ class ChatControllerTest {
                 }
             }
             return prepared;
-        }).when(chatContextAssembler).prepare(anyLong(), anyLong(), anyString(), anyBoolean(), anyMap());
+        }).when(chatContextAssembler).prepare(anyLong(), anyLong(), anyString(), anyBoolean(),
+                org.mockito.ArgumentMatchers.nullable(Long.class), anyMap());
 
         ChatStreamRequest request = new ChatStreamRequest();
         request.setSessionId(testSessionId.toString());
@@ -1839,16 +1840,256 @@ class ChatControllerTest {
                     executionError.getCause());
             Assertions.assertEquals("CONTEXT_SNAPSHOT_STALE",
                     ((com.amha.common.ChatContextPreparationException) executionError.getCause()).getErrorCode());
-            Assertions.assertEquals(0, jdbcTemplate.queryForObject(
+            Assertions.assertEquals(1, jdbcTemplate.queryForObject(
                     "SELECT COUNT(*) FROM consultation_message WHERE session_id = ? "
                             + "AND sender_type = 1 AND content = ?",
                     Integer.class, testSessionId, staleMessage));
+            Assertions.assertEquals("CONTEXT_UNAVAILABLE", jdbcTemplate.queryForObject(
+                    "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                    String.class, testSessionId, request.getClientRequestId()));
+            Long staleUserMessageId = jdbcTemplate.queryForObject(
+                    "SELECT user_message_id FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                    Long.class, testSessionId, request.getClientRequestId());
+            Assertions.assertEquals(staleMessage, jdbcTemplate.queryForObject(
+                    "SELECT content FROM consultation_message WHERE id = ? AND session_id = ? AND sender_type = 1",
+                    String.class, staleUserMessageId, testSessionId));
+            mockMvc.perform(get("/psychological-chat/sessions/{sessionId}/turns/{requestId}",
+                            testSessionId, request.getClientRequestId()).header("token", userToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.data.recoverable").value(true))
+                    .andExpect(jsonPath("$.data.userMessageId").value(staleUserMessageId))
+                    .andExpect(jsonPath("$.data.userMessage").value(staleMessage));
             verify(realChatAgent, never()).streamResponse(eq(testSessionId), eq(staleMessage),
                     anyList(), anyMap(), anyMap());
         } finally {
             releaseSnapshot.countDown();
             executor.shutdownNow();
         }
+    }
+
+    @Test
+    @Order(36)
+    @DisplayName("快照过期时另一轮仍在生成也要保存原请求且不影响活动轮次")
+    void stalePreparedSnapshotIsPersistedWhileAnotherTurnIsStillRunning() throws Exception {
+        Long testSessionId = createSession(userToken);
+        Long ownerId = jdbcTemplate.queryForObject(
+                "SELECT user_id FROM consultation_session WHERE id = ?", Long.class, testSessionId);
+        String staleMessage = "另一轮仍生成时发生快照过期的请求";
+        String activeMessage = "仍在生成中的请求";
+        String activeRequestId = "active-before-stale-" + System.nanoTime();
+        CountDownLatch snapshotPrepared = new CountDownLatch(1);
+        CountDownLatch releaseSnapshot = new CountDownLatch(1);
+
+        doAnswer(invocation -> {
+            ChatContextPreparation prepared = (ChatContextPreparation) invocation.callRealMethod();
+            if (staleMessage.equals(invocation.getArgument(2))) {
+                snapshotPrepared.countDown();
+                if (!releaseSnapshot.await(10, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("Test did not release prepared chat context");
+                }
+            }
+            return prepared;
+        }).when(chatContextAssembler).prepare(anyLong(), anyLong(), anyString(), anyBoolean(),
+                org.mockito.ArgumentMatchers.nullable(Long.class), anyMap());
+
+        ChatStreamRequest request = new ChatStreamRequest();
+        request.setSessionId(testSessionId.toString());
+        request.setClientRequestId("stale-with-active-" + System.nanoTime());
+        request.setUserMessage(staleMessage);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        ChatTurnStore.TurnStart activeTurn = null;
+        try {
+            Future<?> staleRequest = executor.submit(() -> chatService.streamChat(request, ownerId, 0L));
+            Assertions.assertTrue(snapshotPrepared.await(10, TimeUnit.SECONDS),
+                    "The stale request must pause after context preflight");
+
+            activeTurn = chatTurnStore.beginTurn(testSessionId, ownerId, activeRequestId,
+                    sha256Unchecked(activeMessage), activeMessage);
+            Assertions.assertEquals("RUNNING", jdbcTemplate.queryForObject(
+                    "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                    String.class, testSessionId, activeRequestId));
+
+            releaseSnapshot.countDown();
+            java.util.concurrent.ExecutionException executionError = Assertions.assertThrows(
+                    java.util.concurrent.ExecutionException.class,
+                    () -> staleRequest.get(10, TimeUnit.SECONDS));
+            Assertions.assertInstanceOf(com.amha.common.ChatContextPreparationException.class,
+                    executionError.getCause());
+            Assertions.assertEquals("CONTEXT_SNAPSHOT_STALE",
+                    ((com.amha.common.ChatContextPreparationException) executionError.getCause()).getErrorCode());
+            Assertions.assertEquals("RUNNING", jdbcTemplate.queryForObject(
+                    "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                    String.class, testSessionId, activeRequestId));
+
+            Long staleMessageId = jdbcTemplate.queryForObject(
+                    "SELECT user_message_id FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                    Long.class, testSessionId, request.getClientRequestId());
+            Assertions.assertEquals(staleMessage, jdbcTemplate.queryForObject(
+                    "SELECT content FROM consultation_message WHERE id = ? AND session_id = ? AND sender_type = 1",
+                    String.class, staleMessageId, testSessionId));
+            mockMvc.perform(get("/psychological-chat/sessions/{sessionId}/turns/{requestId}",
+                            testSessionId, request.getClientRequestId()).header("token", userToken))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.data.recoverable").value(true))
+                    .andExpect(jsonPath("$.data.userMessageId").value(staleMessageId))
+                    .andExpect(jsonPath("$.data.userMessage").value(staleMessage));
+
+            Assertions.assertThrows(com.amha.common.BusinessException.class,
+                    () -> chatService.streamChat(request, ownerId, 0L),
+                    "真实 service 重试不得越过仍在生成的另一轮");
+            Assertions.assertEquals("CONTEXT_UNAVAILABLE", jdbcTemplate.queryForObject(
+                    "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                    String.class, testSessionId, request.getClientRequestId()));
+            Assertions.assertEquals("RUNNING", jdbcTemplate.queryForObject(
+                    "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                    String.class, testSessionId, activeRequestId));
+
+            chatTurnStore.completeTurn(testSessionId, activeRequestId, activeTurn.generationToken(),
+                    "active reply", 0, "{\"code\":\"200\",\"data\":{\"done\":true}}");
+            activeTurn = null;
+            when(realChatAgent.streamResponse(anyLong(), anyString(), anyList(), anyMap(), anyMap()))
+                    .thenReturn(Flux.just("stale retry reply"));
+            chatService.streamChat(request, ownerId, 0L);
+            awaitTurnCompletion(testSessionId, request.getClientRequestId());
+
+            ArgumentCaptor<List> historyCaptor = ArgumentCaptor.forClass(List.class);
+            verify(realChatAgent).streamResponse(eq(testSessionId), eq(staleMessage),
+                    historyCaptor.capture(), anyMap(), anyMap());
+            @SuppressWarnings("unchecked")
+            List<com.amha.entity.ConsultationMessage> retryHistory = historyCaptor.getValue();
+            Assertions.assertTrue(retryHistory.stream().anyMatch(message -> activeMessage.equals(message.getContent())),
+                    "恢复请求应保留已完成活动轮次的用户消息作为上下文");
+            Assertions.assertTrue(retryHistory.stream().anyMatch(message -> "active reply".equals(message.getContent())),
+                    "恢复请求应保留已完成活动轮次的回复作为上下文");
+            Assertions.assertFalse(retryHistory.stream().anyMatch(message -> staleMessage.equals(message.getContent())),
+                    "关联的原始用户消息应作为当前输入传递，不能重复放入历史");
+        } finally {
+            releaseSnapshot.countDown();
+            if (activeTurn != null) {
+                chatTurnStore.completeTurn(testSessionId, activeRequestId, activeTurn.generationToken(),
+                        "active reply", 0, "{\"code\":\"200\",\"data\":{\"done\":true}}");
+            }
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    @Order(37)
+    @DisplayName("过期活动轮次之后仍有其他活动轮次时不得启动恢复轮次")
+    void expiredActiveTurnDoesNotHideAnotherActiveTurn() throws Exception {
+        Long testSessionId = createSession(userToken);
+        Long ownerId = jdbcTemplate.queryForObject(
+                "SELECT user_id FROM consultation_session WHERE id = ?", Long.class, testSessionId);
+        String expiredRequestId = "expired-before-waiting-" + System.nanoTime();
+        String waitingRequestId = "waiting-after-expired-" + System.nanoTime();
+        String retryRequestId = "retry-context-after-expired-" + System.nanoTime();
+        String retryHash = sha256Unchecked("retry message already persisted");
+        java.time.LocalDateTime expiredAt = java.time.LocalDateTime.now().minusMinutes(10);
+        java.time.LocalDateTime now = java.time.LocalDateTime.now();
+
+        jdbcTemplate.update("INSERT INTO consultation_chat_turn "
+                        + "(session_id, client_request_id, request_hash, status, generation_token, "
+                        + "generation_epoch, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                testSessionId, expiredRequestId, sha256Unchecked(expiredRequestId), "RUNNING",
+                "expired-generation", 1L, expiredAt, expiredAt);
+        jdbcTemplate.update("INSERT INTO consultation_chat_turn "
+                        + "(session_id, client_request_id, request_hash, status, generation_token, "
+                        + "generation_epoch, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                testSessionId, waitingRequestId, sha256Unchecked(waitingRequestId), "WAITING_CONTEXT",
+                "waiting-generation", 0L, now, now);
+        jdbcTemplate.update("INSERT INTO consultation_chat_turn "
+                        + "(session_id, client_request_id, request_hash, status, generation_token, "
+                        + "generation_epoch, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                testSessionId, retryRequestId, retryHash, "CONTEXT_UNAVAILABLE",
+                "retry-generation", 0L, now, now);
+
+        com.amha.common.BusinessException conflict = Assertions.assertThrows(
+                com.amha.common.BusinessException.class,
+                () -> chatTurnStore.beginTurn(testSessionId, ownerId, retryRequestId,
+                        retryHash, "retry message already persisted"));
+
+        Assertions.assertEquals("409", conflict.getCode());
+        Assertions.assertEquals("RUNNING", jdbcTemplate.queryForObject(
+                "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                String.class, testSessionId, expiredRequestId));
+        Assertions.assertEquals("WAITING_CONTEXT", jdbcTemplate.queryForObject(
+                "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                String.class, testSessionId, waitingRequestId));
+        Assertions.assertEquals("CONTEXT_UNAVAILABLE", jdbcTemplate.queryForObject(
+                "SELECT status FROM consultation_chat_turn WHERE session_id = ? AND client_request_id = ?",
+                String.class, testSessionId, retryRequestId));
+    }
+
+    @Test
+    @Order(35)
+    @DisplayName("只允许会话所有者按轮次恢复原始用户消息并校验哈希")
+    void recoverChatTurnReturnsOnlyTheLinkedMessageForTheOwner() throws Exception {
+        Long testSessionId = createSession(userToken);
+        String requestId = "recover-turn-" + System.nanoTime();
+        String originalMessage = "快照过期时持久化的原始消息";
+        String laterMessage = "同一会话中另一设备后续写入的消息";
+        ConsultationMessage linkedMessage = new ConsultationMessage();
+        linkedMessage.setSessionId(testSessionId);
+        linkedMessage.setSenderType(1);
+        linkedMessage.setContent(originalMessage);
+        consultationMessageMapper.insert(linkedMessage);
+        ConsultationMessage unrelatedMessage = new ConsultationMessage();
+        unrelatedMessage.setSessionId(testSessionId);
+        unrelatedMessage.setSenderType(1);
+        unrelatedMessage.setContent(laterMessage);
+        consultationMessageMapper.insert(unrelatedMessage);
+        jdbcTemplate.update("INSERT INTO consultation_chat_turn "
+                        + "(session_id, client_request_id, request_hash, status, generation_token, "
+                        + "generation_epoch, user_message_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                testSessionId, requestId, sha256Unchecked(originalMessage), "CONTEXT_UNAVAILABLE",
+                "recovery-test-token", 0L, linkedMessage.getId());
+
+        mockMvc.perform(get("/psychological-chat/sessions/{sessionId}/turns/{requestId}",
+                        testSessionId, requestId).header("token", userToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.clientRequestId").value(requestId))
+                .andExpect(jsonPath("$.data.status").value("CONTEXT_UNAVAILABLE"))
+                .andExpect(jsonPath("$.data.userMessageId").value(linkedMessage.getId()))
+                .andExpect(jsonPath("$.data.userMessage").value(originalMessage))
+                .andExpect(jsonPath("$.data.recoverable").value(true));
+
+        mockMvc.perform(get("/psychological-chat/sessions/{sessionId}/turns/{requestId}",
+                        testSessionId, requestId).header("token", otherUserToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("403"));
+
+        jdbcTemplate.update("UPDATE consultation_chat_turn SET request_hash = ? "
+                        + "WHERE session_id = ? AND client_request_id = ?",
+                sha256Unchecked("different request body"), testSessionId, requestId);
+        mockMvc.perform(get("/psychological-chat/sessions/{sessionId}/turns/{requestId}",
+                        testSessionId, requestId).header("token", userToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.recoverable").value(false))
+                .andExpect(jsonPath("$.data.userMessage").doesNotExist());
+
+        String legacyRequestId = requestId + "-legacy";
+        jdbcTemplate.update("INSERT INTO consultation_chat_turn "
+                        + "(session_id, client_request_id, request_hash, status, generation_token, generation_epoch) "
+                        + "VALUES (?, ?, ?, ?, ?, ?)",
+                testSessionId, legacyRequestId, sha256Unchecked(originalMessage), "CONTEXT_UNAVAILABLE",
+                "legacy-recovery-token", 0L);
+        mockMvc.perform(get("/psychological-chat/sessions/{sessionId}/turns/{requestId}",
+                        testSessionId, legacyRequestId).header("token", userToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.recoverable").value(false))
+                .andExpect(jsonPath("$.data.userMessage").doesNotExist());
+
+        String completedRequestId = requestId + "-completed";
+        jdbcTemplate.update("INSERT INTO consultation_chat_turn "
+                        + "(session_id, client_request_id, request_hash, status, generation_token, "
+                        + "generation_epoch, user_message_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                testSessionId, completedRequestId, sha256Unchecked(originalMessage), "COMPLETED",
+                "completed-recovery-token", 0L, linkedMessage.getId());
+        mockMvc.perform(get("/psychological-chat/sessions/{sessionId}/turns/{requestId}",
+                        testSessionId, completedRequestId).header("token", userToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.recoverable").value(false))
+                .andExpect(jsonPath("$.data.userMessage").doesNotExist());
     }
 
     private void seedOverflowingHistory(Long targetSessionId) {

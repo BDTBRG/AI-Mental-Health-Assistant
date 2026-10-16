@@ -12,6 +12,7 @@ import type {
 	KnowledgeArticleQuery,
 	KnowledgeArticleDetail,
 	AgentMemoryItem,
+	ChatTurnRecovery,
 } from '@/types/user'
 
 export function register(
@@ -84,6 +85,15 @@ export function getHistorySessionMessages(
 	sessionId: string,
 ): Promise<Message[]> {
 	return request.get(`/psychological-chat/sessions/${sessionId}/messages`)
+}
+
+export function recoverChatTurn(
+	sessionId: string,
+	clientRequestId: string,
+): Promise<ChatTurnRecovery | null> {
+	return request.get(
+		`/psychological-chat/sessions/${sessionId}/turns/${encodeURIComponent(clientRequestId)}`,
+	)
 }
 
 export function getEmotionAnalysis(

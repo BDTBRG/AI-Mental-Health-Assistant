@@ -16,6 +16,8 @@ public class ConsultationChatTurn {
     private Long sessionId;
     @TableField("client_request_id")
     private String clientRequestId;
+    @TableField("user_message_id")
+    private Long userMessageId;
     private String requestHash;
     private String status;
     private String generationToken;

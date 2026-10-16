@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS `consultation_chat_turn` (
     `id` BIGINT NOT NULL AUTO_INCREMENT,
     `session_id` BIGINT NOT NULL,
     `client_request_id` VARCHAR(64) NOT NULL,
+    `user_message_id` BIGINT DEFAULT NULL,
     `request_hash` CHAR(64) NOT NULL,
     `status` VARCHAR(20) NOT NULL DEFAULT 'RUNNING',
     `generation_token` CHAR(36) NOT NULL,

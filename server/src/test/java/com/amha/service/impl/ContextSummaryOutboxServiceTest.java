@@ -163,6 +163,25 @@ class ContextSummaryOutboxServiceTest {
     }
 
     @Test
+    void exhaustedQueuedTaskMovesToDeadBeforeAnotherAgentCall() {
+        ContextSummaryOutboxService service = service();
+        ConsultationContextSummaryOutbox task = task(30L, 10L, 7L, 80L, "QUEUED", "dispatch");
+        task.setAttemptCount(8);
+        when(outboxMapper.selectById(30L)).thenReturn(task);
+        when(sessionMapper.selectByIdForUpdate(10L)).thenReturn(session(10L, 7L));
+        when(outboxMapper.selectByIdForUpdate(30L)).thenReturn(task);
+
+        ContextSummaryOutboxService.ContextSummaryClaim claim = service.claimForProcessing(30L);
+
+        assertNull(claim);
+        assertEquals("DEAD", task.getStatus());
+        assertEquals("MAX_ATTEMPTS_EXCEEDED", task.getLastErrorCode());
+        assertNull(task.getLeaseToken());
+        verify(metrics).recordFailed();
+        verify(summaryMapper, never()).selectBySessionAndUserForUpdate(10L, 7L);
+    }
+
+    @Test
     void loadRequestUsesOnlyMessagesAfterTheSummaryWatermarkAndWithinBothBudgets() {
         ContextSummaryOutboxService service = service();
         ContextSummaryOutboxService.ContextSummaryClaim claim =

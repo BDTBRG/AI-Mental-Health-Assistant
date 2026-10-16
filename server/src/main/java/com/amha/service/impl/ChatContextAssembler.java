@@ -61,6 +61,12 @@ public class ChatContextAssembler {
     public ChatContextPreparation prepare(Long sessionId, Long userId, String userMessage,
                                           boolean currentMessagePersisted,
                                           Map<String, Object> agentContext) {
+        return prepare(sessionId, userId, userMessage, currentMessagePersisted, null, agentContext);
+    }
+
+    public ChatContextPreparation prepare(Long sessionId, Long userId, String userMessage,
+                                          boolean currentMessagePersisted, Long currentMessageId,
+                                          Map<String, Object> agentContext) {
         if (sessionId == null || userId == null || userMessage == null) {
             return unavailable(null, null, 0L);
         }
@@ -106,13 +112,17 @@ public class ChatContextAssembler {
         }
 
         if (currentMessagePersisted) {
-            if (history.isEmpty()) return unavailable(contextSummary, null, watermark);
-            ConsultationMessage last = history.get(history.size() - 1);
-            if (!Integer.valueOf(1).equals(last.getSenderType())
-                    || !Objects.equals(userMessage, last.getContent())) {
+            if (currentMessageId == null || maxMessageId == null) {
                 return unavailable(contextSummary, null, watermark);
             }
-            history.remove(history.size() - 1);
+            ConsultationMessage linkedMessage = messageMapper.selectUserMessageByIdForOwner(
+                    currentMessageId, sessionId, userId);
+            if (linkedMessage == null || !Objects.equals(currentMessageId, linkedMessage.getId())
+                    || !Objects.equals(userMessage, linkedMessage.getContent())
+                    || currentMessageId > maxMessageId) {
+                return unavailable(contextSummary, null, watermark);
+            }
+            history.removeIf(message -> currentMessageId.equals(message.getId()));
         }
 
         int currentChars = codePoints(userMessage);

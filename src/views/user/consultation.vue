@@ -150,6 +150,19 @@
 					</div>
 				</div>
 			</div>
+			<div v-if="pendingTurnSessions.length" class="pending-recovery-list">
+				<h4 class="section-title">待恢复会话</h4>
+				<button
+					v-for="session in pendingTurnSessions"
+					:key="session.id"
+					:data-testid="`pending-recovery-session-${session.id}`"
+					class="pending-recovery-session"
+					type="button"
+					@click="handleSwitchSession(session)">
+					<span class="pending-recovery-session-title">{{ session.sessionTitle }}</span>
+					<span class="pending-recovery-session-status">{{ getPendingRecoveryStatus(session) }}</span>
+				</button>
+			</div>
 		</div>
 		<div class="chat-main">
 			<div class="chat-header">
@@ -187,7 +200,7 @@
 				</div>
 				<el-button
 					circle
-					:disabled="isStartingSession || isRecoveringStart || sessionStartRecoveryError"
+					:disabled="isStartingSession || isLoadingSession || sessionLoadError || isRecoveringStart || sessionStartRecoveryError || isRestoringPendingTurn"
 					@click="createNewSession"
 					title="新建会话">
 					<el-icon><Plus /></el-icon>
@@ -203,8 +216,9 @@
 						class="retry-session-load"
 						text
 						type="primary"
+						:disabled="isLoadingSessionList"
 						@click="retrySessionLoad">
-						重新加载
+						{{ isLoadingSessionList ? '正在重试…' : '重新加载' }}
 					</el-button>
 				</div>
 				<div v-else-if="isRecoveringStart" class="session-load-state" role="status">
@@ -228,6 +242,12 @@
 					</el-button>
 				</div>
 				<template v-else>
+				<div
+					v-if="pendingTurnRecoveryProtocolError"
+					class="pending-turn-recovery-protocol-error"
+					role="alert">
+					恢复接口返回的请求标识与本地记录不一致。原恢复标识已保留，自动续接已停止；确认会话记录后可从待恢复会话入口重试。
+				</div>
 				<el-button v-if="hasOlderMessages" text type="primary" class="load-older" @click="loadOlderMessages">
 					加载更早的对话（{{ messageList.length - renderedMessages.length }} 条）
 				</el-button>
@@ -277,7 +297,10 @@
 							</div>
 							<div
 								v-else-if="message.isError"
-								class="error-message">
+								class="error-message"
+								:class="{ 'context-status-message': message.errorCode }"
+								role="status"
+								aria-live="polite">
 								<p>{{ message.content }}</p>
 								<el-button
 									v-if="message.canReconnect"
@@ -285,7 +308,7 @@
 									text
 									type="primary"
 									@click.stop="retryAiResponse(message)">
-									重新连接本轮回复
+									{{ message.retryLabel || '重新连接本轮回复' }}
 								</el-button>
 							</div>
 							<MarkdownRenderer
@@ -320,14 +343,17 @@
 						class="message-input"
 						clearable />
 					<div class="input-footer">
-						<span>按 Enter 键发送，shift + enter换行</span>
+						<span v-if="isTurnPending" class="pending-turn-hint">
+							当前轮次尚未确认，请先重新检查后再发送下一条
+						</span>
+						<span v-else>按 Enter 键发送，shift + enter换行</span>
 						<span>{{ userMessage.length }}/500</span>
 					</div>
 				</div>
 				<el-button
 					type="primary"
 					class="send-btn"
-					:disabled="isStartingSession || isLoadingSession || sessionLoadError || isRecoveringStart || sessionStartRecoveryError || isAiTying"
+					:disabled="isStartingSession || isLoadingSession || sessionLoadError || isRecoveringStart || sessionStartRecoveryError || isAiTying || isTurnPending || isRestoringPendingTurn"
 					@click="sendMessage">
 					<el-icon><Promotion /></el-icon>
 				</el-button>
@@ -395,6 +421,7 @@ import {
 	recoverSessionStart,
 	deleteSession,
 	getHistorySessionMessages,
+	recoverChatTurn,
 	getEmotionAnalysis,
 } from '@/api/user'
 import type {
@@ -404,6 +431,7 @@ import type {
 	StartSession,
 	EmotionAnalysis,
 	AgentMemoryItem,
+	ChatTurnRecovery,
 } from '@/types/user'
 import MarkdownRenderer from '@/components/MarkdownRenderer.vue'
 import { fetchEventSource } from '@microsoft/fetch-event-source'
@@ -413,9 +441,12 @@ const iconUrl2 = new URL('@/assets/like.png', import.meta.url).href
 const iconUrl3 = new URL('@/assets/users.png', import.meta.url).href
 
 const isAiTying = ref<boolean>(false)
+const isTurnPending = ref(false)
+const isRestoringPendingTurn = ref(false)
 const isStartingSession = ref(false)
 const isRecoveringStart = ref(false)
 const sessionStartRecoveryError = ref(false)
+const pendingTurnRecoveryProtocolError = ref(false)
 const activeStreamController = ref<AbortController | null>(null)
 let activeStreamSequence = 0
 let componentActive = false
@@ -552,6 +583,7 @@ const clearAllAgentMemories = async () => {
 
 const messageList = ref<Message[]>([])
 const isLoadingSession = ref(false)
+const isLoadingSessionList = ref(false)
 const sessionLoadError = ref(false)
 const sessionLoadTarget = ref<HistorySession | null>(null)
 const chatMessagesContainer = ref<HTMLElement | null>(null)
@@ -576,6 +608,7 @@ const loadOlderMessages = async () => {
 }
 
 const sessionList = ref<HistorySession[]>([])
+const pendingTurnSessions = ref<HistorySession[]>([])
 
 const createEmptyEmotion = (): EmotionAnalysis => ({
 	primaryEmotion: '等待分析',
@@ -614,9 +647,12 @@ const createNewSession = async () => {
 	invalidateActiveStream()
 	isLoadingSession.value = false
 	sessionLoadError.value = false
+	isRestoringPendingTurn.value = false
 	sessionLoadTarget.value = null
 	isRecoveringStart.value = false
 	sessionStartRecoveryError.value = false
+	pendingTurnRecoveryProtocolError.value = false
+	isTurnPending.value = false
 	currentSession.value = {
 		sessionId: `temp_${Date.now()}`,
 		status: 'TEMP',
@@ -666,11 +702,15 @@ const sendMessage = () => {
 		ElMessage.warning('AI正在输入，请稍后...')
 		return
 	}
+	if (isTurnPending.value) {
+		ElMessage.warning('请先重新检查当前轮次，再发送下一条消息')
+		return
+	}
 	if (isStartingSession.value) {
 		ElMessage.warning('正在创建会话，请稍候...')
 		return
 	}
-	if (isLoadingSession.value || sessionLoadError.value) {
+	if (isLoadingSession.value || sessionLoadError.value || isRestoringPendingTurn.value) {
 		ElMessage.warning('请先完成会话加载，再发送消息')
 		return
 	}
@@ -865,8 +905,10 @@ const recoverPendingSessionStart = async (requestId: string) => {
 	}
 }
 
+const pendingTurnKeyPrefix = 'amha:pending-chat-turn:'
+
 const pendingTurnKey = (sessionId: string) =>
-	`amha:pending-chat-turn:${sessionId}`
+	`${pendingTurnKeyPrefix}${sessionId}`
 
 const readPendingTurn = (sessionId: string) => {
 	try {
@@ -884,12 +926,75 @@ const savePendingTurn = (sessionId: string, requestId: string) => {
 	}
 }
 
-const clearPendingTurn = (sessionId: string) => {
+const clearPendingTurn = (sessionId: string, expectedRequestId?: string) => {
 	try {
+		if (
+			expectedRequestId !== undefined &&
+			readPendingTurn(sessionId) !== expectedRequestId
+		) return
 		sessionStorage.removeItem(pendingTurnKey(sessionId))
+		pendingTurnSessions.value = pendingTurnSessions.value.filter(
+			session => session.id.toString() !== sessionId,
+		)
 	} catch {
 		// Storage can be unavailable in private browsing contexts.
 	}
+}
+
+const getPendingTurnSessionIds = (): string[] => {
+	const sessionIds: string[] = []
+	try {
+		for (let index = 0; index < sessionStorage.length; index++) {
+			const key = sessionStorage.key(index)
+			if (!key?.startsWith(pendingTurnKeyPrefix)) continue
+			const sessionId = key.slice(pendingTurnKeyPrefix.length)
+			const numericSessionId = Number(sessionId)
+			if (
+				Number.isSafeInteger(numericSessionId) &&
+				numericSessionId > 0 &&
+				readPendingTurn(sessionId)
+			) sessionIds.push(sessionId)
+		}
+	} catch {
+		// Storage can be unavailable in private browsing contexts.
+	}
+	return sessionIds
+}
+
+const findPendingTurnSessions = async (
+	firstPage: ListData<HistorySession>,
+	): Promise<HistorySession[]> => {
+	const pendingSessionIds = new Set(getPendingTurnSessionIds())
+	if (!pendingSessionIds.size) return []
+
+	const pendingSessions: HistorySession[] = []
+	const collectPendingSessions = (records: HistorySession[]) => {
+		for (const record of records) {
+			const sessionId = record.id.toString()
+			if (pendingSessionIds.delete(sessionId)) pendingSessions.push(record)
+		}
+	}
+	collectPendingSessions(firstPage.records)
+
+	const pageSize = firstPage.size || 10
+	const totalPages = Math.ceil((firstPage.total || 0) / pageSize)
+	let pageNum = (firstPage.current || 1) + 1
+	while (pendingSessionIds.size > 0 && pageNum <= totalPages) {
+		const page = await getHistorySessionList({ pageNum, pageSize })
+		if (!componentActive) return []
+		collectPendingSessions(page.records)
+		pageNum++
+	}
+	return pendingSessions
+}
+
+const getPendingRecoveryStatus = (session: HistorySession) => {
+	if (currentSession.value.sessionId !== session.id.toString()) return '待恢复'
+	if (sessionLoadError.value) return '加载失败，可重试'
+	if (isRestoringPendingTurn.value) return '正在恢复'
+	if (isAiTying.value) return '正在续接回复'
+	if (isTurnPending.value) return '等待重试'
+	return '待恢复'
 }
 
 const startAiResponse = async (
@@ -924,11 +1029,17 @@ const startAiResponse = async (
 	aiMessage.content = ''
 	aiMessage.isError = false
 	aiMessage.canReconnect = false
+	aiMessage.errorCode = undefined
+	aiMessage.retryLabel = undefined
 	aiMessage.clientRequestId = clientRequestId
 	aiMessage.requestContent = requestContent
 	if (!existingAiMessage) messageList.value.push(aiMessage)
 	isAiTying.value = true
-	savePendingTurn(sessionId, clientRequestId)
+	isTurnPending.value = true
+	const currentPendingRequestId = readPendingTurn(sessionId)
+	if (!existingAiMessage || !currentPendingRequestId || currentPendingRequestId === clientRequestId) {
+		savePendingTurn(sessionId, clientRequestId)
+	}
 	scrollChatToBottom()
 
 	const ctrl = new AbortController()
@@ -956,6 +1067,72 @@ const startAiResponse = async (
 				if (
 					!response.headers.get('Content-Type')?.includes('text/event-stream')
 				) {
+					const contextResult = await response.clone().json().catch(() => null) as {
+						code?: unknown
+						data?: {
+							clientRequestId?: unknown
+							retryable?: unknown
+						}
+					} | null
+					const errorCode = String(contextResult?.code ?? '')
+					const contextMessages: Record<string, { content: string; retryLabel: string }> = {
+						CONTEXT_SUMMARY_PENDING: {
+							content: '正在整理较早的对话。你的消息已保留，完成后可手动重新检查。',
+							retryLabel: '重新检查',
+						},
+						CONTEXT_SUMMARY_UNAVAILABLE: {
+							content: '暂时无法整理较早的对话，摘要服务暂不可用。你的消息已保留，可稍后手动重试。',
+							retryLabel: '稍后重试',
+						},
+						CONTEXT_SNAPSHOT_STALE: {
+							content: '会话内容刚刚发生变化，本轮消息已安全保存。可基于最新上下文手动重试。',
+							retryLabel: '重试本轮',
+						},
+						CONTEXT_WINDOW_TOO_LARGE: {
+							content: '近期对话超过当前安全上下文上限。请新建会话后继续，本轮不会自动重试。',
+							retryLabel: '',
+						},
+						CONTEXT_REQUEST_SUPERSEDED: {
+							content: '这条请求已被后续消息替代，请从会话最近一条消息继续。',
+							retryLabel: '',
+						},
+					}
+					const contextMessage = contextMessages[errorCode]
+					if (contextMessage) {
+						const serverRequestId = contextResult?.data?.clientRequestId
+						if (serverRequestId !== clientRequestId) {
+							aiMessage.content = '服务器返回的轮次标识无法与本次请求匹配，已停止自动恢复。请检查会话历史后再继续。'
+							aiMessage.isError = true
+							aiMessage.errorCode = 'CONTEXT_REQUEST_ID_MISMATCH'
+							aiMessage.canReconnect = false
+							isTurnPending.value = true
+							streamFinished = true
+							isAiTying.value = false
+							ctrl.abort()
+							return
+						}
+						const retryableCode = [
+							'CONTEXT_SUMMARY_PENDING',
+							'CONTEXT_SUMMARY_UNAVAILABLE',
+							'CONTEXT_SNAPSHOT_STALE',
+						].includes(errorCode)
+						const canRetry = retryableCode && contextResult?.data?.retryable !== false
+						aiMessage.content = contextMessage.content
+						aiMessage.isError = true
+						aiMessage.errorCode = errorCode
+						aiMessage.canReconnect = canRetry
+						aiMessage.retryLabel = canRetry ? contextMessage.retryLabel : undefined
+						if (clearDraftOnAccept && userMessage.value.trim() === requestContent) {
+							userMessage.value = ''
+						}
+						if (canRetry) savePendingTurn(sessionId, clientRequestId)
+						else clearPendingTurn(sessionId, clientRequestId)
+						isTurnPending.value = canRetry || Boolean(readPendingTurn(sessionId))
+						streamFinished = true
+						isAiTying.value = false
+						ctrl.abort()
+						return
+					}
 					throw new Error('服务器暂时无法建立流式连接')
 				}
 				if (clearDraftOnAccept && userMessage.value.trim() === requestContent) {
@@ -971,7 +1148,8 @@ const startAiResponse = async (
 					streamFinished = true
 					isAiTying.value = false
 					aiMessage.canReconnect = false
-					clearPendingTurn(sessionId)
+					clearPendingTurn(sessionId, aiMessage.clientRequestId || clientRequestId)
+					isTurnPending.value = Boolean(readPendingTurn(sessionId))
 					getCurrentEmotion(sessionId)
 					void getHistorySessionPage()
 					void getHistorySessionMessages(sessionId)
@@ -988,6 +1166,8 @@ const startAiResponse = async (
 					aiMessage.content = ''
 					aiMessage.isError = false
 					aiMessage.canReconnect = false
+					aiMessage.errorCode = undefined
+					aiMessage.retryLabel = undefined
 					return
 				}
 				const payload = JSON.parse(raw)
@@ -1004,7 +1184,8 @@ const startAiResponse = async (
 					aiMessage.isError = true
 					aiMessage.canReconnect = false
 					isAiTying.value = false
-					clearPendingTurn(sessionId)
+					clearPendingTurn(sessionId, aiMessage.clientRequestId || clientRequestId)
+					isTurnPending.value = Boolean(readPendingTurn(sessionId))
 					ElMessage.error(payload.message || 'AI回复失败，请稍后再试')
 				}
 			},
@@ -1038,7 +1219,8 @@ const startAiResponse = async (
 		:	'连接中断，回复未完成'
 		aiMessage.isError = true
 		aiMessage.canReconnect = !isFatal
-		if (isFatal) clearPendingTurn(sessionId)
+		if (isFatal) clearPendingTurn(sessionId, clientRequestId)
+		isTurnPending.value = Boolean(readPendingTurn(sessionId)) || !isFatal
 		ElMessage.error(aiMessage.content)
 	} finally {
 		if (streamSequence === activeStreamSequence) {
@@ -1060,29 +1242,52 @@ const retryAiResponse = (message: Message) => {
 		message.requestContent,
 		message.clientRequestId,
 		message,
+		true,
 	)
 }
 
 const getHistorySessionPage = async () => {
+	if (isLoadingSessionList.value) return
+	isLoadingSessionList.value = true
 	let data: ListData<HistorySession>
+	let pendingSessions: HistorySession[] = []
 	try {
 		data = await getHistorySessionList({
 			pageNum: 1,
 			pageSize: 10,
 		})
+		if (resumePendingTurnOnLoad) {
+			pendingSessions = await findPendingTurnSessions(data)
+		}
 	} catch {
-		if (componentActive) ElMessage.error('会话列表加载失败，请稍后重试')
+		if (componentActive) {
+			ElMessage.error('会话列表加载失败，请稍后重试')
+			if (resumePendingTurnOnLoad) {
+				sessionLoadError.value = true
+				isRestoringPendingTurn.value = false
+			}
+		}
 		return
+	} finally {
+		isLoadingSessionList.value = false
 	}
 	if (!componentActive) return
 	// console.log('会话列表数据：', data)
+	sessionLoadError.value = false
 	sessionList.value = data.records
 	if (resumePendingTurnOnLoad) {
 		resumePendingTurnOnLoad = false
-		const pendingSession = data.records.find(item => readPendingTurn(item.id.toString()))
-		if (pendingSession && currentSession.value.status === 'TEMP') {
-			void handleSwitchSession(pendingSession)
+		pendingTurnSessions.value = pendingSessions
+		if (
+			pendingSessions.length &&
+			currentSession.value.status === 'TEMP' &&
+			!isRecoveringStart.value &&
+			!sessionStartRecoveryError.value &&
+			!readPendingSessionStart()
+		) {
+			void handleSwitchSession(pendingSessions[0])
 		}
+		isRestoringPendingTurn.value = false
 	}
 }
 
@@ -1094,7 +1299,9 @@ const handleEnter = (event: KeyboardEvent) => {
 }
 
 const retrySessionLoad = () => {
+	if (isLoadingSessionList.value) return
 	if (sessionLoadTarget.value) void handleSwitchSession(sessionLoadTarget.value)
+	else void getHistorySessionPage()
 }
 
 const handleSwitchSession = async (session: HistorySession) => {
@@ -1104,6 +1311,7 @@ const handleSwitchSession = async (session: HistorySession) => {
 	}
 	const loadSequence = ++sessionLoadSequence
 	invalidateActiveStream()
+	isTurnPending.value = false
 	isRecoveringStart.value = false
 	sessionStartRecoveryError.value = false
 	sessionLoadTarget.value = session
@@ -1114,6 +1322,7 @@ const handleSwitchSession = async (session: HistorySession) => {
 	currentSession.value.sessionId = session.id.toString()
 	currentSession.value.status = 'ACTIVE'
 	currentSession.value.sessionTitle = session.sessionTitle
+	pendingTurnRecoveryProtocolError.value = false
 	reviewConsent.value = Boolean(session.reviewConsent)
 	reviewStatus.value = session.reviewStatus ?? 'NONE'
 	resetCurrentEmotion()
@@ -1124,28 +1333,74 @@ const handleSwitchSession = async (session: HistorySession) => {
 		visibleMessageCount.value = 40
 		getCurrentEmotion(session.id.toString())
 		const pendingRequestId = readPendingTurn(session.id.toString())
-		const lastMessage = data[data.length - 1]
-		if (pendingRequestId && lastMessage?.senderType === 1) {
-			startAiResponse(
-				session.id.toString(),
-				lastMessage.content,
-				pendingRequestId,
-			)
-		}
-		else {
-			if (pendingRequestId) clearPendingTurn(session.id.toString())
+		if (!pendingRequestId) {
+			isTurnPending.value = false
 			scrollChatToBottom()
+			return
 		}
+
+		isRestoringPendingTurn.value = true
+		isTurnPending.value = true
+		const recovered = await recoverChatTurn(session.id.toString(), pendingRequestId)
+		if (!componentActive || loadSequence !== sessionLoadSequence) return
+		if (recovered && recovered.clientRequestId !== pendingRequestId) {
+			isTurnPending.value = true
+			pendingTurnRecoveryProtocolError.value = true
+			scrollChatToBottom()
+			return
+		}
+		if (!isValidRecoveredTurn(recovered, pendingRequestId)) {
+			clearPendingTurn(session.id.toString(), pendingRequestId)
+			isTurnPending.value = Boolean(readPendingTurn(session.id.toString()))
+			ElMessage.warning('上次消息无法安全恢复，请检查会话记录后重新输入')
+			scrollChatToBottom()
+			return
+		}
+		const existingIndex = data.findIndex(message => message.id === recovered.userMessageId)
+		const recoveredMessage: Message = {
+			id: recovered.userMessageId,
+			sessionId: session.id,
+			senderType: 1,
+			content: recovered.userMessage,
+			createdAt: existingIndex >= 0
+				? data[existingIndex].createdAt || '时间未知'
+				: '时间未知',
+		}
+		if (existingIndex >= 0) data[existingIndex] = { ...data[existingIndex], ...recoveredMessage }
+		else data.push(recoveredMessage)
+		data.sort((left, right) => left.id - right.id)
+		messageList.value = [...data]
+		visibleMessageCount.value = 40
+		startAiResponse(
+			session.id.toString(),
+			recovered.userMessage,
+			pendingRequestId,
+		)
 	} catch {
 		if (componentActive && loadSequence === sessionLoadSequence) {
 			sessionLoadError.value = true
 		}
 	} finally {
 		if (componentActive && loadSequence === sessionLoadSequence) {
+			isRestoringPendingTurn.value = false
 			isLoadingSession.value = false
 		}
 	}
 }
+
+const isValidRecoveredTurn = (
+	turn: ChatTurnRecovery | null,
+	requestId: string,
+): turn is ChatTurnRecovery & { userMessageId: number; userMessage: string } =>
+	Boolean(
+		turn &&
+		turn.clientRequestId === requestId &&
+		turn.recoverable &&
+		Number.isSafeInteger(turn.userMessageId) &&
+		turn.userMessageId! > 0 &&
+		typeof turn.userMessage === 'string' &&
+		turn.userMessage.length > 0,
+	)
 
 const handleDeleteSession = async (sessionId: string) => {
 	if (isAiTying.value) {
@@ -1159,6 +1414,7 @@ const handleDeleteSession = async (sessionId: string) => {
 		createNewSession()
 	}
 	await deleteSession(sessionId)
+	clearPendingTurn(sessionId)
 	await getHistorySessionPage()
 }
 
@@ -1211,11 +1467,13 @@ const getCurrentEmotion = async (sessionId: string) => {
 onMounted(() => {
 	componentActive = true
 	const pendingStartRequestId = readPendingSessionStart()
+	resumePendingTurnOnLoad = true
+	isRestoringPendingTurn.value = true
 	if (pendingStartRequestId) {
 		void recoverPendingSessionStart(pendingStartRequestId)
 	} else {
-		resumePendingTurnOnLoad = true
 		createNewSession()
+		isRestoringPendingTurn.value = true
 	}
 	void getHistorySessionPage()
 })
@@ -1387,6 +1645,47 @@ onBeforeUnmount(() => {
 					text-align: center;
 					font-size: 14px;
 					color: #999;
+				}
+			}
+			.pending-recovery-list {
+				margin-top: 12px;
+				padding-top: 12px;
+				border-top: 1px solid #f1f1f1;
+				max-height: 160px;
+				overflow-y: auto;
+
+				.section-title {
+					margin-bottom: 8px;
+					font-size: 14px;
+					color: #8a5a00;
+				}
+
+				.pending-recovery-session {
+					width: 100%;
+					border: 0;
+					border-radius: 8px;
+					padding: 8px 10px;
+					margin-bottom: 4px;
+					background: transparent;
+					text-align: left;
+					cursor: pointer;
+					display: flex;
+					flex-direction: column;
+					gap: 4px;
+
+					&:hover {
+						background: #fff8e6;
+					}
+
+					.pending-recovery-session-title {
+						font-size: 13px;
+						color: #333;
+					}
+
+					.pending-recovery-session-status {
+						font-size: 12px;
+						color: #a16207;
+					}
 				}
 			}
 		}
@@ -1690,6 +1989,16 @@ onBeforeUnmount(() => {
 				text-align: center;
 				.session-load-error p { margin: 0 0 8px; }
 			}
+			.pending-turn-recovery-protocol-error {
+				align-self: center;
+				max-width: 80%;
+				padding: 10px 14px;
+				border: 1px solid #fca5a5;
+				border-radius: 8px;
+				background: #fef2f2;
+				color: #991b1b;
+				text-align: center;
+			}
 			.load-older { align-self: center; flex-shrink: 0; }
 			.message-item {
 				display: flex;
@@ -1770,6 +2079,11 @@ onBeforeUnmount(() => {
 							display: flex;
 							align-items: center;
 							gap: 8px;
+							&.context-status-message {
+								background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+								border-color: #fbbf24;
+								color: #92400e;
+							}
 						}
 					}
 					.message-time {
@@ -1803,6 +2117,9 @@ onBeforeUnmount(() => {
 				font-size: 12px;
 				color: #78716c;
 				font-weight: 500;
+				.pending-turn-hint {
+					color: #a16207;
+				}
 			}
 			.send-btn {
 				height: 60px;

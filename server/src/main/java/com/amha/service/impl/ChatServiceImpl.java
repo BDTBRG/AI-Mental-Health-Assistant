@@ -154,6 +154,7 @@ public class ChatServiceImpl implements ChatService {
             ConsultationChatTurn firstTurn = new ConsultationChatTurn();
             firstTurn.setSessionId(session.getId());
             firstTurn.setClientRequestId(startRequestId);
+            firstTurn.setUserMessageId(firstMessage.getId());
             firstTurn.setRequestHash(sha256(initialMessage));
             firstTurn.setStatus("PENDING");
             firstTurn.setGenerationToken(UUID.randomUUID().toString());
@@ -177,6 +178,11 @@ public class ChatServiceImpl implements ChatService {
             return null;
         }
         return toStartSessionResponse(session, null);
+    }
+
+    @Override
+    public ChatTurnRecoveryResponse recoverChatTurn(Long sessionId, String clientRequestId, Long userId) {
+        return chatTurnStore.recoverTurn(sessionId, clientRequestId, userId);
     }
 
     private StartSessionResponse existingStartResponse(ConsultationSession session,
@@ -381,7 +387,8 @@ public class ChatServiceImpl implements ChatService {
         if (prepareContext) {
             preparedAgentContext = new java.util.LinkedHashMap<>(buildAgentContext(userId));
             ChatContextPreparation preparation = chatContextAssembler.prepare(
-                    sessionId, userId, userMessage, existingTurn != null, preparedAgentContext);
+                    sessionId, userId, userMessage, existingTurn != null,
+                    existingTurn == null ? null : existingTurn.getUserMessageId(), preparedAgentContext);
             if (preparation.status() == ChatContextPreparation.Status.WINDOW_TOO_LARGE) {
                 chatTurnStore.rejectContextTurn(sessionId, userId, turnRequestId, requestHash, userMessage);
                 throw preparation.toException(turnRequestId);
@@ -401,8 +408,19 @@ public class ChatServiceImpl implements ChatService {
                 throw preparation.toException(turnRequestId);
             }
             contextSnapshot = preparation.toSnapshot();
-            turnStart = chatTurnStore.beginTurn(sessionId, userId, turnRequestId, requestHash,
-                    userMessage, contextSnapshot);
+            try {
+                turnStart = chatTurnStore.beginTurn(sessionId, userId, turnRequestId, requestHash,
+                        userMessage, contextSnapshot);
+            } catch (ChatContextPreparationException staleSnapshot) {
+                if (!"CONTEXT_SNAPSHOT_STALE".equals(staleSnapshot.getErrorCode())) throw staleSnapshot;
+                boolean superseded = chatTurnStore.markContextUnavailable(sessionId, userId, turnRequestId,
+                        requestHash, userMessage, true);
+                if (superseded) {
+                    throw new ChatContextPreparationException("CONTEXT_REQUEST_SUPERSEDED",
+                            "该请求已被后续对话替代，请从最近一条消息继续", turnRequestId, false, 0L);
+                }
+                throw staleSnapshot;
+            }
         } else {
             // Existing active or terminal turns attach/replay without waiting for summary work.
             turnStart = chatTurnStore.beginTurn(sessionId, userId, turnRequestId, requestHash, userMessage);

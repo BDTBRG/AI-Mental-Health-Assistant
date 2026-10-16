@@ -2,6 +2,7 @@ package com.amha.service.impl;
 
 import com.amha.common.BusinessException;
 import com.amha.common.ChatContextPreparationException;
+import com.amha.dto.ChatTurnRecoveryResponse;
 import com.amha.dto.ChatContextSnapshot;
 import com.amha.entity.ConsultationChatTurn;
 import com.amha.entity.ConsultationMessage;
@@ -16,8 +17,12 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.HexFormat;
+import java.util.List;
 import java.util.UUID;
 import java.util.Objects;
 
@@ -73,6 +78,7 @@ public class ChatTurnStore {
             }
             if ("PENDING".equals(existing.getStatus()) || "WAITING_CONTEXT".equals(existing.getStatus())
                     || "CONTEXT_UNAVAILABLE".equals(existing.getStatus())) {
+                expireOrRejectOtherActiveTurn(sessionId, requestId);
                 supersedeOtherUnavailableTurns(sessionId, requestId);
                 String generationToken = UUID.randomUUID().toString();
                 long generationEpoch = nextGenerationEpoch(existing);
@@ -85,6 +91,7 @@ public class ChatTurnStore {
             }
             if ("RUNNING".equals(existing.getStatus()) && existing.getUpdatedAt() != null
                     && !existing.getUpdatedAt().isAfter(LocalDateTime.now().minusMinutes(5))) {
+                expireOrRejectOtherActiveTurn(sessionId, requestId);
                 supersedeOtherUnavailableTurns(sessionId, requestId);
                 Integer maxSequence = eventMapper.selectMaxSequence(sessionId, requestId);
                 int resetSequence = (maxSequence == null ? -1 : maxSequence) + 1;
@@ -122,6 +129,8 @@ public class ChatTurnStore {
         userMsg.setSenderType(1);
         userMsg.setContent(userMessage);
         messageMapper.insert(userMsg);
+        turn.setUserMessageId(userMsg.getId());
+        turnMapper.updateById(turn);
 
         session.setMessageCount((session.getMessageCount() == null ? 0 : session.getMessageCount()) + 1);
         session.setLastMessageContent(messagePreview(userMessage));
@@ -174,7 +183,8 @@ public class ChatTurnStore {
         turn.setUpdatedAt(now);
         turnMapper.insert(turn);
 
-        persistUserMessage(session, userMessage, now);
+        turn.setUserMessageId(persistUserMessage(session, userMessage, now));
+        turnMapper.updateById(turn);
         enqueueSummaryTarget(sessionId, userId, targetThroughMessageId);
     }
 
@@ -218,11 +228,50 @@ public class ChatTurnStore {
         turn.setCreatedAt(now);
         turn.setUpdatedAt(now);
         turnMapper.insert(turn);
-        persistUserMessage(session, userMessage, now);
+        turn.setUserMessageId(persistUserMessage(session, userMessage, now));
+        turnMapper.updateById(turn);
     }
 
     public ConsultationChatTurn findTurn(Long sessionId, String requestId) {
         return turnMapper.selectBySessionAndRequest(sessionId, requestId);
+    }
+
+    @Transactional(readOnly = true)
+    public ChatTurnRecoveryResponse recoverTurn(Long sessionId, String requestId, Long userId) {
+        if (sessionId == null || userId == null || requestId == null || requestId.isBlank()
+                || requestId.length() > 64) {
+            throw new BusinessException("400", "恢复请求参数无效");
+        }
+        ConsultationSession session = sessionMapper.selectById(sessionId);
+        if (session == null) throw new BusinessException("404", "会话不存在");
+        if (!userId.equals(session.getUserId())) {
+            throw new BusinessException("403", "无权访问该会话");
+        }
+
+        ConsultationChatTurn turn = turnMapper.selectBySessionAndRequest(sessionId, requestId);
+        if (turn == null) return null;
+        Long messageId = turn.getUserMessageId();
+        if (messageId == null) {
+            return new ChatTurnRecoveryResponse(turn.getClientRequestId(), turn.getStatus(),
+                    null, null, false);
+        }
+        ConsultationMessage message = messageMapper.selectUserMessageByIdForOwner(messageId, sessionId, userId);
+        if (message == null || message.getContent() == null
+                || !sha256(message.getContent()).equals(turn.getRequestHash())) {
+            return new ChatTurnRecoveryResponse(turn.getClientRequestId(), turn.getStatus(),
+                    null, null, false);
+        }
+
+        boolean recoverable = switch (turn.getStatus()) {
+            case "PENDING", "WAITING_CONTEXT", "CONTEXT_UNAVAILABLE", "RUNNING" -> true;
+            default -> false;
+        };
+        if (!recoverable) {
+            return new ChatTurnRecoveryResponse(turn.getClientRequestId(), turn.getStatus(),
+                    null, null, false);
+        }
+        return new ChatTurnRecoveryResponse(turn.getClientRequestId(), turn.getStatus(),
+                message.getId(), message.getContent(), recoverable);
     }
 
     @Transactional
@@ -237,7 +286,7 @@ public class ChatTurnStore {
         if (existing == null) {
             if (!persistMissingRequest) return false;
             supersedeOtherUnavailableTurns(sessionId, requestId);
-            expireOrRejectOtherActiveTurn(sessionId, requestId);
+            // Keep the original request durable even if another turn is active; retry still checks that turn.
             LocalDateTime now = LocalDateTime.now();
             ConsultationChatTurn turn = new ConsultationChatTurn();
             turn.setSessionId(sessionId);
@@ -249,7 +298,8 @@ public class ChatTurnStore {
             turn.setCreatedAt(now);
             turn.setUpdatedAt(now);
             turnMapper.insert(turn);
-            persistUserMessage(session, userMessage, now);
+            turn.setUserMessageId(persistUserMessage(session, userMessage, now));
+            turnMapper.updateById(turn);
             return false;
         }
         requireSameRequest(existing, requestHash);
@@ -405,7 +455,7 @@ public class ChatTurnStore {
                 || !turn.getUpdatedAt().isAfter(LocalDateTime.now().minusMinutes(5)));
     }
 
-    private void persistUserMessage(ConsultationSession session, String userMessage, LocalDateTime now) {
+    private Long persistUserMessage(ConsultationSession session, String userMessage, LocalDateTime now) {
         ConsultationMessage userMsg = new ConsultationMessage();
         userMsg.setSessionId(session.getId());
         userMsg.setSenderType(1);
@@ -416,6 +466,16 @@ public class ChatTurnStore {
         session.setLastMessageContent(messagePreview(userMessage));
         session.setLastMessageTime(now);
         sessionMapper.updateById(session);
+        return userMsg.getId();
+    }
+
+    private static String sha256(String value) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (Exception error) {
+            throw new IllegalStateException("Unable to hash chat recovery message", error);
+        }
     }
 
     private String messagePreview(String message) {
@@ -434,22 +494,29 @@ public class ChatTurnStore {
     }
 
     private void expireOrRejectOtherActiveTurn(Long sessionId, String requestId) {
-        ConsultationChatTurn activeTurn = turnMapper.selectActiveBySessionForUpdate(sessionId);
-        if (activeTurn == null || requestId.equals(activeTurn.getClientRequestId())) return;
-        if ("WAITING_CONTEXT".equals(activeTurn.getStatus())) {
-            throw new BusinessException("409", "上一条消息仍在整理上下文，请使用原 clientRequestId 重试");
+        List<ConsultationChatTurn> activeTurns = turnMapper.selectOtherActiveBySessionForUpdate(sessionId, requestId);
+        if (activeTurns == null || activeTurns.isEmpty()) return;
+        LocalDateTime now = LocalDateTime.now();
+
+        // Check every active turn before expiring any of them. A stale earlier row must not
+        // hide a newer pending generation or a turn that is still waiting for its summary.
+        for (ConsultationChatTurn activeTurn : activeTurns) {
+            if ("WAITING_CONTEXT".equals(activeTurn.getStatus())) {
+                throw new BusinessException("409", "上一条消息仍在整理上下文，请使用原 clientRequestId 重试");
+            }
+            if (activeTurn.getUpdatedAt() == null || activeTurn.getUpdatedAt().isAfter(now.minusMinutes(5))) {
+                throw new BusinessException("409", "上一条回复仍在生成，请稍后重试");
+            }
         }
 
-        LocalDateTime now = LocalDateTime.now();
-        if (activeTurn.getUpdatedAt() == null || activeTurn.getUpdatedAt().isAfter(now.minusMinutes(5))) {
-            throw new BusinessException("409", "上一条回复仍在生成，请稍后重试");
+        for (ConsultationChatTurn activeTurn : activeTurns) {
+            Integer maxSequence = eventMapper.selectMaxSequence(sessionId, activeTurn.getClientRequestId());
+            activeTurn.setStatus("FAILED");
+            activeTurn.setUpdatedAt(now);
+            turnMapper.updateById(activeTurn);
+            insertEvent(sessionId, activeTurn.getClientRequestId(),
+                    (maxSequence == null ? -1 : maxSequence) + 1, "error",
+                    "{\"code\":\"500\",\"message\":\"对话服务已中断，请重新发送消息\"}");
         }
-        Integer maxSequence = eventMapper.selectMaxSequence(sessionId, activeTurn.getClientRequestId());
-        activeTurn.setStatus("FAILED");
-        activeTurn.setUpdatedAt(now);
-        turnMapper.updateById(activeTurn);
-        insertEvent(sessionId, activeTurn.getClientRequestId(),
-                (maxSequence == null ? -1 : maxSequence) + 1, "error",
-                "{\"code\":\"500\",\"message\":\"对话服务已中断，请重新发送消息\"}");
     }
 }
